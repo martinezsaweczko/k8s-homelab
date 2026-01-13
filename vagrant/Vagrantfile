@@ -1,0 +1,77 @@
+# Vagrantfile to create 3 Fedora VMs for testing the playbooks
+# Default private subnet prefix (change if needed): 192.168.56
+# Default addresses: 192.168.56.101, .102, .103
+# Default user/password on each VM: david / PWD
+
+Vagrant.configure("2") do |config|
+  # Box to use (Fedora 38). Change if you prefer another Fedora box
+  BOX = ENV['VAGRANT_BOX'] || 'bento/fedora-38'
+  SUBNET = ENV['VAGRANT_SUBNET'] || '192.168.56'
+  ips = ["#{SUBNET}.101", "#{SUBNET}.102", "#{SUBNET}.103"]
+
+  # Password for user 'david' (must be set in environment)
+  DAVID_PASSWORD = ENV['DAVID_PASSWORD']
+  abort "ERROR: DAVID_PASSWORD environment variable must be set before running 'vagrant up'" unless DAVID_PASSWORD && !DAVID_PASSWORD.empty?
+
+  # Global config
+  # Increase VM boot timeout to accommodate slower boxes
+  config.vm.boot_timeout = 600
+
+
+  config.vm.provider :virtualbox do |vb|
+    vb.memory = 2048
+    vb.cpus = 2
+  end
+
+  (1..3).each do |i|
+    name = "node#{i}"
+    ip = ips[i-1]
+
+    config.vm.define name do |node|
+      node.vm.box = BOX
+      node.vm.hostname = name
+
+      node.vm.network "private_network", ip: ip, auto_config: true
+
+      # Workaround: Disable cloud-init network config and enforce static IP with NetworkManager
+      node.vm.provision "shell", privileged: true, inline: <<-SHELL
+        set -eux
+        # Disable cloud-init network config
+        if [ -f /etc/cloud/cloud.cfg.d/99-vagrant.cfg ]; then
+          echo 'network: {config: disabled}' > /etc/cloud/cloud.cfg.d/99-vagrant-disable-networking.cfg
+        fi
+        # Create a NetworkManager connection for eth1 with the static IP
+        nmcli con add type ethernet ifname eth1 con-name vagrant-static-eth1 autoconnect yes ip4 #{ip}/24
+        nmcli con mod vagrant-static-eth1 ipv4.method manual
+        nmcli con up vagrant-static-eth1
+      SHELL
+
+      # Add an extra 20GB disk as /dev/sdb (VirtualBox)
+      node.vm.provider "virtualbox" do |vb2|
+        disk_dir = File.join(Dir.pwd, "vagrant_disks")
+        Dir.mkdir(disk_dir) unless File.exist?(disk_dir)
+        disk_path = File.join(disk_dir, "#{name}-sdb.vdi")
+        # create a 20GB disk if it does not exist
+        vb2.customize ['createhd', '--filename', disk_path, '--size', 20480] unless File.exist?(disk_path)
+        # attach the disk on port 1 (will appear as /dev/sdb in guest if no other sd present)
+        vb2.customize ['storageattach', :id, '--storagectl', 'SATA Controller', '--port', 1, '--device', 0, '--type', 'hdd', '--medium', disk_path]
+      end
+
+      # Use default vagrant user/key for initial SSH; we will create `david` during provisioning
+      node.ssh.insert_key = false
+
+      # Provision: create 'david' with password, add sudo no-password, copy vagrant key to david
+      node.vm.provision "shell", inline: <<-SHELL
+        set -e
+        # Create user david and set password
+        id -u david >/dev/null 2>&1 || sudo useradd -m -s /bin/bash david
+        echo "david:#{DAVID_PASSWORD}" | sudo chpasswd
+        # Add david to wheel and allow passwordless sudo
+        sudo usermod -aG wheel david
+        echo "david ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/david
+        sudo chmod 0440 /etc/sudoers.d/david
+      SHELL
+    end
+  end
+
+end

@@ -1,0 +1,26 @@
+# Global variables for all hosts
+---
+# These variables can be overridden by group_vars or host_vars
+
+# Common settings
+timezone: UTC
+update_packages: true
+
+# Kubernetes settings
+k8s_version: "1.28"
+container_runtime: "containerd"
+pod_network_cidr: "10.244.0.0/16"
+k8s_microk8s_channel: "stable"
+
+# Ceph settings
+ceph_version: "quincy"
+ceph_release: "quincy"
+ceph_public_network: "0.0.0.0/0"
+ceph_cluster_network: "0.0.0.0/0"
+
+# Storage pools
+ceph_pool_name: "kubernetes"
+ceph_pool_pg_num: 128
+ceph_pool_pgp_num: 128
+ceph_pool_size: 3
+ceph_pool_min_size: 2

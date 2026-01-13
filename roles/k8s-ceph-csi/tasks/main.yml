@@ -1,0 +1,197 @@
+---
+- name: Check if kubeconfig exists
+  stat:
+    path: "{{ kubeconfig_path }}"
+  register: kubeconfig_stat
+  become: false
+
+- name: Fail if kubeconfig not found
+  fail:
+    msg: "Kubeconfig not found at {{ kubeconfig_path }}. Please ensure Kubernetes is running and kubeconfig is copied."
+  when: not kubeconfig_stat.stat.exists
+
+- name: Create ceph-csi-rbd namespace
+  kubernetes.core.k8s:
+    name: "{{ ceph_csi_namespace }}"
+    api_version: v1
+    kind: Namespace
+    state: present
+    kubeconfig: "{{ kubeconfig_path }}"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+
+- name: Add ceph-csi Helm repository
+  kubernetes.core.helm_repository:
+    name: ceph-csi
+    repo_url: https://ceph.github.io/csi-charts
+    state: present
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+
+- name: Get Ceph FSId
+  command: sudo ceph fsid
+  register: ceph_fsid
+  changed_when: false
+
+- name: Get Ceph monitor addresses (JSON)
+  command: sudo ceph mon dump -f json
+  register: ceph_mon_dump
+  changed_when: false
+
+- name: Build monitor list from mon dump
+  set_fact:
+    ceph_monitors: "{{ (ceph_mon_dump.stdout | from_json).mons | map(attribute='addr') | map('regex_replace','/.*$','') | join(',') }}"
+
+- name: Get Ceph client.kubernetes key
+  command: sudo ceph auth get-key client.kubernetes
+  register: ceph_client_key
+  changed_when: false
+  no_log: true
+
+- name: Create ceph-secret in ceph-csi-rbd namespace
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: ceph-secret
+        namespace: "{{ ceph_csi_namespace }}"
+      type: Opaque
+      stringData:
+        userID: "{{ ceph_k8s_client }}"
+        userKey: "{{ ceph_client_key.stdout }}"
+        ceph.conf: |
+          [global]
+          fsid = {{ ceph_fsid.stdout }}
+          mon_host = {{ ceph_monitors }}
+    kubeconfig: "{{ kubeconfig_path }}"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  no_log: true
+
+- name: Create ceph-secret in target namespace
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: ceph-secret
+        namespace: "{{ ceph_k8s_namespace }}"
+      type: Opaque
+      stringData:
+        userID: "{{ ceph_k8s_client }}"
+        userKey: "{{ ceph_client_key.stdout }}"
+        ceph.conf: |
+          [global]
+          fsid = {{ ceph_fsid.stdout }}
+          mon_host = {{ ceph_monitors }}
+    kubeconfig: "{{ kubeconfig_path }}"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  no_log: true
+
+- name: Detect ready Kubernetes nodes
+  command: kubectl --kubeconfig {{ kubeconfig_path }} get nodes --no-headers 2>/dev/null | awk '$2=="Ready" {print $1}' | wc -l
+  register: ready_nodes
+  changed_when: false
+  failed_when: false
+
+- name: Set provisioner replicas based on node count
+  set_fact:
+    ceph_csi_provisioner_replicas: "{{ 1 if (ready_nodes.stdout | int) <= 1 else 3 }}"
+
+- name: Install Ceph CSI RBD driver via Helm
+  kubernetes.core.helm:
+    name: ceph-csi-rbd
+    chart_ref: ceph-csi/ceph-csi-rbd
+    release_namespace: "{{ ceph_csi_namespace }}"
+    values:
+      cephClusterSecretName: ceph-secret
+      cephClusterSecretNamespace: "{{ ceph_csi_namespace }}"
+    wait: false
+    kubeconfig: "{{ kubeconfig_path }}"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: ceph_csi_helm_install
+
+- name: Ensure provisioner replicas match node count
+  kubernetes.core.k8s:
+    kind: Deployment
+    name: ceph-csi-rbd-provisioner
+    namespace: "{{ ceph_csi_namespace }}"
+    kubeconfig: "{{ kubeconfig_path }}"
+    definition:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: ceph-csi-rbd-provisioner
+        namespace: "{{ ceph_csi_namespace }}"
+      spec:
+        replicas: "{{ ceph_csi_provisioner_replicas }}"
+  when: ceph_csi_helm_install is defined and ceph_csi_provisioner_replicas is defined
+  register: scaled_provisioner
+  failed_when: false
+
+- name: Wait for CSI provisioner to be ready
+  kubernetes.core.k8s_info:
+    kind: Deployment
+    namespace: "{{ ceph_csi_namespace }}"
+    name: ceph-csi-rbd-provisioner
+    kubeconfig: "{{ kubeconfig_path }}"
+    wait: true
+    wait_condition:
+      type: Available
+      status: "True"
+    wait_sleep: 5
+    wait_timeout: 120
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+
+- name: Create StorageClass for Ceph RBD
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: storage.k8s.io/v1
+      kind: StorageClass
+      metadata:
+        name: "{{ ceph_csi_storage_class }}"
+      provisioner: rbd.csi.ceph.com
+      parameters:
+        clusterID: "{{ ceph_fsid.stdout }}"
+        pool: "{{ ceph_k8s_pool }}"
+        imageFeatures: "{{ ceph_csi_rbd_image_features }}"
+        csi.storage.k8s.io/provisioner-secret-name: ceph-secret
+        csi.storage.k8s.io/provisioner-secret-namespace: "{{ ceph_csi_namespace }}"
+        csi.storage.k8s.io/controller-expand-secret-name: ceph-secret
+        csi.storage.k8s.io/controller-expand-secret-namespace: "{{ ceph_csi_namespace }}"
+        csi.storage.k8s.io/node-stage-secret-name: ceph-secret
+        csi.storage.k8s.io/node-stage-secret-namespace: "{{ ceph_k8s_namespace }}"
+      reclaimPolicy: "{{ ceph_csi_rbd_reclaim_policy }}"
+      allowVolumeExpansion: "{{ ceph_csi_rbd_allow_expansion }}"
+    kubeconfig: "{{ kubeconfig_path }}"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+
+- name: Display CSI RBD installation summary
+  debug:
+    msg:
+      - "=========================================="
+      - "✓ Ceph CSI RBD Driver Installed"
+      - "=========================================="
+      - "Cluster ID: {{ ceph_fsid.stdout }}"
+      - "Monitors: {{ ceph_monitors }}"
+      - "Namespace: {{ ceph_csi_namespace }}"
+      - "StorageClass: {{ ceph_csi_storage_class }}"
+      - "Pool: {{ ceph_k8s_pool }}"
+      - "RBD Client: {{ ceph_k8s_client }}"
+      - ""
+      - "Verify installation:"
+      - "  kubectl get pods -n {{ ceph_csi_namespace }}"
+      - "  kubectl get storageclass {{ ceph_csi_storage_class }}"
+      - ""
+
+- name: Test CSI RBD with PVC
+  include_tasks: test.yml
+  when: enable_ceph_csi_test | bool

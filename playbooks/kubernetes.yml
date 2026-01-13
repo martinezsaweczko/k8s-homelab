@@ -1,0 +1,6 @@
+---
+# Kubernetes installation and configuration playbook
+- name: Setup Kubernetes Masters
+  hosts: k8s_masters
+  roles:
+    - k8s-master

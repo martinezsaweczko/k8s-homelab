@@ -1,0 +1,10 @@
+---
+# Ceph OSD variables
+ceph_osds_count: 1
+
+# Specify OSD devices here
+# Single-node setup (current): List devices to enable OSDs
+# Multi-node setup: Specify devices, e.g., ['/dev/sdb', '/dev/sdc', '/dev/nvme0n1']
+# Each device will have a dedicated OSD
+ceph_osd_devices:
+  - /dev/sdb

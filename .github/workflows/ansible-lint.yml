@@ -1,0 +1,21 @@
+name: Ansible Lint
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install ansible-lint
+        run: pip install ansible-lint
+
+      - name: Run ansible-lint
+        run: ansible-lint -v

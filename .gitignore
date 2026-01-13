@@ -1,0 +1,36 @@
+# Ansible
+*.retry
+!*.example
+
+# Secrets and sensitive files
+vault.yml
+.vault-pass
+secrets.yml
+group_vars/*/vault.yml
+host_vars/*/vault.yml
+
+# Environment
+.env
+.env.local
+*.pem
+*.key
+*.pfx
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+
+# OS
+.DS_Store
+.AppleDouble
+.LSOverride

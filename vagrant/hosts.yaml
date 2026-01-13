@@ -1,0 +1,41 @@
+# Converted from previous INI inventory
+# Ceph monitor/osd examples (commented in original INI) are provided below as examples
+# ceph_monitors:
+#   hosts:
+#     node1:
+#       ansible_host: 192.168.56.101
+# ceph_osds:
+#   hosts:
+#     node1:
+#       ansible_host: 192.168.56.101
+#     node2:
+#       ansible_host: 192.168.56.102
+#     node3:
+#       ansible_host: 192.168.56.103
+
+all:
+  children:
+    ceph_monitors:
+      hosts: {}
+    ceph_osds:
+      hosts: {}
+    k8s_masters:
+      hosts:
+        node1:
+          ansible_host: 192.168.56.101
+          ansible_user: david
+          node_hostname: homelab1
+        node2:
+          ansible_host: 192.168.56.102
+          ansible_user: david
+          node_hostname: homelab2
+        node3:
+          ansible_host: 192.168.56.103
+          ansible_user: david
+          node_hostname: homelab3
+    k8s_workers:
+      hosts: {}
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+    ansible_become: true
+    ansible_become_method: sudo

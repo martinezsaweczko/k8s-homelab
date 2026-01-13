@@ -1,0 +1,9 @@
+---
+- name: Install Ceph CSI RBD driver for Kubernetes
+  hosts: k8s_masters
+  gather_facts: yes
+
+  roles:
+    - role: k8s-ceph-csi
+      vars:
+        enable_ceph_csi_test: false # Set to true to run PVC test after installation

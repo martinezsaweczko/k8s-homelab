@@ -1,0 +1,276 @@
+---
+# Kubernetes Master setup with MicroK8s
+
+- name: Install snapd (required for MicroK8s)
+  block:
+    - name: Install snapd package
+      dnf:
+        name: snapd
+        state: present
+
+    - name: Enable and start snapd service
+      systemd:
+        name: snapd
+        state: started
+        enabled: yes
+        daemon_reload: yes
+
+    - name: Enable snapd socket
+      systemd:
+        name: snapd.socket
+        state: started
+        enabled: yes
+
+    - name: Create symlink for snap command
+      file:
+        src: /var/lib/snapd/snap
+        dest: /snap
+        state: link
+        force: yes
+      ignore_errors: yes
+
+    - name: Wait for snapd to be ready
+      pause:
+        seconds: 5
+
+- name: Install MicroK8s
+  block:
+    - name: Install MicroK8s snap
+      snap:
+        name: microk8s
+        classic: yes
+        channel: "{{ k8s_microk8s_channel | default('stable') }}"
+      register: microk8s_install
+      until: microk8s_install is succeeded
+      retries: 3
+      delay: 10
+
+    - name: Wait for MicroK8s to initialize
+      pause:
+        seconds: 30
+      when: microk8s_install.changed
+
+    - name: Add user to microk8s group
+      user:
+        name: "{{ ansible_user }}"
+        groups: microk8s
+        append: yes
+
+    - name: Set proper permissions on microk8s config
+      file:
+        path: /var/snap/microk8s/current/credentials
+        mode: "0755"
+        state: directory
+
+    - name: Create kubectl wrapper script for easy access
+      copy:
+        content: |
+          #!/bin/bash
+          # Wrapper script to run microk8s kubectl
+          exec /snap/bin/microk8s.kubectl "$@"
+        dest: /usr/local/bin/kubectl
+        mode: "0755"
+        force: yes
+
+    - name: Start MicroK8s service explicitly
+      shell: |
+        microk8s start
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Wait for MicroK8s cluster to bootstrap (5 minutes)
+      shell: |
+        for i in {1..60}; do
+          if microk8s status 2>&1 | grep -q "microk8s is running"; then
+            echo "MicroK8s is ready"
+            exit 0
+          fi
+          echo "Attempt $i/60: Waiting for cluster to initialize..."
+          sleep 5
+        done
+        echo "Timeout waiting for cluster initialization"
+        exit 1
+      register: bootstrap_result
+      ignore_errors: yes
+      changed_when: false
+
+- name: Configure MicroK8s addons
+  block:
+    - name: Enable core addons (resilient)
+      shell: |
+        microk8s enable dns || true
+        microk8s enable hostpath-storage || microk8s enable storage || true
+        microk8s enable rbac || true
+      register: enable_addons
+      failed_when: false
+      changed_when: "'created' in enable_addons.stdout or 'enabled' in enable_addons.stdout"
+      environment:
+        KUBECONFIG: /var/snap/microk8s/current/credentials/client.config
+
+    - name: Wait for CoreDNS to be running
+      shell: |
+        microk8s kubectl get pods -n kube-system -l k8s-app=kube-dns -o jsonpath='{.items[*].status.phase}'
+      register: dns_pods
+      until: "'Running' in dns_pods.stdout"
+      retries: 12
+      delay: 5
+      environment:
+        KUBECONFIG: /var/snap/microk8s/current/credentials/client.config
+
+    - name: Wait for hostpath provisioner deployment to be available
+      shell: microk8s kubectl rollout status deployment/hostpath-provisioner -n kube-system --timeout=120s
+      register: hostpath_rollout
+      until: hostpath_rollout.rc == 0
+      retries: 12
+      delay: 5
+      environment:
+        KUBECONFIG: /var/snap/microk8s/current/credentials/client.config
+
+    - name: Wait for MicroK8s cluster to be ready
+      shell: |
+        microk8s kubectl get nodes
+      register: k8s_nodes
+      until: k8s_nodes.rc == 0
+      retries: 10
+      delay: 10
+      environment:
+        KUBECONFIG: /var/snap/microk8s/current/credentials/client.config
+
+- name: Setup kubeconfig for local access
+  block:
+    - name: Create .kube directory
+      file:
+        path: "/home/{{ ansible_user }}/.kube"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0755"
+
+    - name: Copy kubeconfig
+      shell: |
+        microk8s config > /tmp/kubeconfig
+        cat /tmp/kubeconfig
+      register: kubeconfig_content
+      changed_when: false
+      environment:
+        KUBECONFIG: /var/snap/microk8s/current/credentials/client.config
+
+    - name: Write kubeconfig to user home
+      copy:
+        content: "{{ kubeconfig_content.stdout }}"
+        dest: "/home/{{ ansible_user }}/.kube/config"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0600"
+
+    - name: Set KUBECONFIG environment variable
+      lineinfile:
+        path: "/home/{{ ansible_user }}/.bashrc"
+        line: "export KUBECONFIG=/home/{{ ansible_user }}/.kube/config"
+        create: yes
+
+- name: Verify MicroK8s installation
+  block:
+    - name: Check MicroK8s status
+      shell: microk8s status
+      register: microk8s_status
+      changed_when: false
+
+    - name: Display MicroK8s status
+      debug:
+        msg: "{{ microk8s_status.stdout }}"
+
+    - name: Check cluster nodes
+      shell: "microk8s kubectl get nodes -o wide"
+      register: cluster_nodes
+      changed_when: false
+      environment:
+        KUBECONFIG: /var/snap/microk8s/current/credentials/client.config
+
+    - name: Display cluster nodes
+      debug:
+        msg: "{{ cluster_nodes.stdout }}"
+
+    - name: Check cluster info
+      shell: "microk8s kubectl cluster-info"
+      register: cluster_info
+      changed_when: false
+      environment:
+        KUBECONFIG: /var/snap/microk8s/current/credentials/client.config
+
+    - name: Display cluster info
+      debug:
+        msg: "{{ cluster_info.stdout }}"
+
+- name: Generate cluster join token for workers and control-plane (bootstrap master only)
+  when: inventory_hostname == groups['k8s_masters'][0]
+  block:
+    - name: Wait for cluster to stabilize before adding nodes
+      shell: |
+        for i in {1..30}; do
+          if microk8s kubectl get nodes 2>&1 | grep -q "Ready"; then
+            echo "Cluster is ready"
+            exit 0
+          fi
+          echo "Attempt $i/30: Waiting for cluster readiness..."
+          sleep 2
+        done
+        echo "Cluster may not be fully ready, proceeding anyway"
+      changed_when: false
+      ignore_errors: yes
+
+- name: Get microk8s join command
+  command: microk8s add-node
+  delegate_to: "{{ groups['k8s_masters'][0] }}"
+  register: k8s_join_command
+
+- name: Extract join command
+  set_fact:
+    microk8s_join_cmd: "{{ k8s_join_command.stdout_lines | select('search', '^microk8s join 192') | first }}"
+
+- name: Debug inventory names on this host
+  debug:
+    msg:
+      - "inventory_hostname={{ inventory_hostname }}"
+      - "ansible_host={{ ansible_host | default('undef') }}"
+      - "groups['k8s_masters'][0]={{ groups['k8s_masters'][0] }}"
+      - "groups['k8s_masters']={{ groups['k8s_masters'] }}"
+      - "Join command: {{ k8s_join_command | default('undefined') }}"
+      - "Join command bcp: {{ microk8s_join_cmd | default('undefined') }}"
+
+- name: Join cluster as control-plane
+  shell: |
+    {{ microk8s_join_cmd }}
+  when:
+    - inventory_hostname != groups['k8s_masters'][0]
+  register: join_cp_result
+  until: join_cp_result.rc == 0
+  retries: 5
+  delay: 10
+
+- name: Wait for control-plane node to become ready locally
+  shell: microk8s status --wait-ready
+  register: local_ready
+  until: local_ready.rc == 0
+  retries: 12
+  delay: 5
+  changed_when: false
+  environment:
+    KUBECONFIG: /var/snap/microk8s/current/credentials/client.config
+  when:
+    - inventory_hostname != groups['k8s_masters'][0]
+    - join_cp_result is changed
+
+- name: Verify control-plane node joined cluster (check from bootstrap)
+  delegate_to: "{{ groups['k8s_masters'][0] }}"
+  shell: |
+    microk8s kubectl get nodes --no-headers | grep -i "^{{ node_hostname }}\b" && echo "Node joined successfully"
+  register: join_verify_cp
+  until: join_verify_cp.rc == 0
+  retries: 12
+  delay: 5
+  changed_when: false
+  environment:
+    KUBECONFIG: /var/snap/microk8s/current/credentials/client.config
+  when:
+    - inventory_hostname != groups['k8s_masters'][0]

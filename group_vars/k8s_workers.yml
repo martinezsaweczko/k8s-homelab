@@ -1,0 +1,8 @@
+---
+# Kubernetes Worker node variables
+k8s_microk8s_channel: "stable"
+
+# Workers should also have these enabled for pod networking
+enable_dns: false
+enable_storage: false
+enable_rbac: false

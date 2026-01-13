@@ -1,0 +1,21 @@
+---
+# Ceph CSI RBD Integration with Kubernetes
+ceph_csi_namespace: ceph-csi-rbd
+ceph_csi_rbd_version: v3.15.1
+ceph_k8s_namespace: default
+ceph_k8s_pool: kubernetes
+ceph_k8s_client: kubernetes
+
+# Kubeconfig for K8s access
+kubeconfig_path: /home/david/.kube/config
+
+# CSI RBD StorageClass settings
+ceph_csi_storage_class: ceph-csi-rbd
+ceph_csi_rbd_image_features: layering
+ceph_csi_rbd_reclaim_policy: Delete
+ceph_csi_rbd_allow_expansion: "true"
+
+# Test configuration
+enable_ceph_csi_test: false
+ceph_csi_test_pvc_size: 1Gi
+ceph_csi_test_pod_image: busybox:latest

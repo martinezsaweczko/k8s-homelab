@@ -1,0 +1,5 @@
+---
+# Ceph Monitor defaults
+ceph_version: "quincy"
+ceph_public_network: "0.0.0.0/0"
+ceph_cluster_network: "0.0.0.0/0"

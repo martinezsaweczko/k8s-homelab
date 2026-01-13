@@ -1,0 +1,16 @@
+---
+# Ceph installation and configuration playbook
+- name: Setup Ceph Monitors
+  hosts: ceph_monitors
+  roles:
+    - ceph-monitor
+
+- name: Setup Ceph OSDs
+  hosts: ceph_osds
+  roles:
+    - ceph-osd
+
+- name: Integrate Ceph with Kubernetes
+  hosts: k8s_masters
+  roles:
+    - ceph-k8s-integration

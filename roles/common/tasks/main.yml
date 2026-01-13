@@ -1,0 +1,141 @@
+---
+# Common tasks for all hosts
+- name: Stop and disable firewalld
+  systemd:
+    name: firewalld
+    state: stopped
+    enabled: no
+  ignore_errors: yes
+
+- name: Remove firewalld package
+  dnf:
+    name: firewalld
+    state: absent
+  ignore_errors: yes
+
+- name: Set hostname
+  block:
+    - name: Set hostname using hostnamectl
+      shell: |
+        hostnamectl set-hostname {{ node_hostname | default(inventory_hostname) }}
+      changed_when: true
+      when: node_hostname is defined
+
+    - name: Update /etc/hostname file
+      copy:
+        content: "{{ node_hostname | default(inventory_hostname) }}\n"
+        dest: /etc/hostname
+        mode: "0644"
+      when: node_hostname is defined
+
+    - name: Verify hostname is set
+      shell: |
+        hostname -f
+      register: hostname_verify
+      changed_when: false
+      when: node_hostname is defined
+
+    - name: Display hostname
+      debug:
+        msg: "Hostname set to: {{ hostname_verify.stdout }}"
+      when: node_hostname is defined
+
+- name: Update package cache
+  dnf:
+    name: "*"
+    state: latest
+  when: update_packages | default(true)
+
+- name: Install basic packages
+  dnf:
+    name:
+      - curl
+      - wget
+      - git
+      - vim
+      - net-tools
+      - openssh-server
+      - openssh-clients
+      - ca-certificates
+      - gnupg
+      - lsb_release
+      - python3-pip
+      - policycoreutils-python-utils
+    state: present
+
+- name: Set timezone
+  timezone:
+    name: "{{ timezone | default('UTC') }}"
+
+# Kubernetes prerequisites - OS configuration
+- name: Disable swap permanently
+  block:
+    - name: Turn off swap
+      shell: swapoff -a
+      when: ansible_swaptotal_mb > 0
+
+    - name: Remove swap from fstab
+      lineinfile:
+        path: /etc/fstab
+        regexp: '^([^#].*?\s+swap\s+.*)$'
+        line: '# \1'
+        backrefs: yes
+
+- name: Load kernel modules required for Kubernetes
+  modprobe:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - overlay
+    - br_netfilter
+
+- name: Configure sysctl for Kubernetes
+  sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    state: present
+    reload: yes
+  with_dict:
+    net.bridge.bridge-nf-call-iptables: "1"
+    net.bridge.bridge-nf-call-ip6tables: "1"
+    net.ipv4.ip_forward: "1"
+    vm.overcommit_memory: "1"
+    kernel.panic: "10"
+    kernel.panic_on_oops: "1"
+
+- name: Configure system limits for Kubernetes
+  lineinfile:
+    path: /etc/security/limits.conf
+    line: "{{ item }}"
+    insertbefore: "^# End of file"
+  loop:
+    - "*       soft    nofile      65536"
+    - "*       hard    nofile      65536"
+    - "*       soft    nproc       65536"
+    - "*       hard    nproc       65536"
+
+- name: Apply limits to current session
+  shell: |
+    ulimit -n 65536
+    ulimit -u 65536
+
+- name: Ensure /etc/modules-load.d directory exists
+  file:
+    path: /etc/modules-load.d
+    state: directory
+    mode: "0755"
+
+- name: Persist kernel modules across reboots
+  copy:
+    content: |
+      overlay
+      br_netfilter
+    dest: /etc/modules-load.d/kubernetes.conf
+    mode: "0644"
+
+- name: Install Python dependencies for Ansible
+  pip:
+    name:
+      - pyyaml
+      - jsonpatch
+    state: present

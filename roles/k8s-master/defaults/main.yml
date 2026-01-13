@@ -1,0 +1,4 @@
+---
+# MicroK8s configuration defaults
+k8s_microk8s_channel: "stable"
+k8s_pod_network_cidr: "10.244.0.0/16"

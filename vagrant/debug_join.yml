@@ -1,0 +1,71 @@
+---
+- name: Fetch MicroK8s join script from master (run once)
+  hosts: k8s_masters
+  gather_facts: no
+  run_once: true
+  tasks:
+    - name: Ensure join script exists
+      stat:
+        path: /opt/microk8s-join/join-command.sh
+      register: join_stat
+      become: yes
+
+    - name: Read join script
+      slurp:
+        src: /opt/microk8s-join/join-command.sh
+      register: join_script
+      become: yes
+      when: join_stat.stat.exists
+
+    - name: Set join script fact for workers
+      set_fact:
+        k8s_join_script: "{{ join_script.content }}"
+      when: join_stat.stat.exists
+
+    - name: Show join script (decoded)
+      debug:
+        msg: "{{ (k8s_join_script | b64decode).splitlines() | join('\n') }}"
+      when: join_stat.stat.exists
+
+- name: Execute join script on workers
+  hosts: k8s_workers
+  gather_facts: no
+  tasks:
+    - name: Fetch join script content from master fact
+      set_fact:
+        join_script_b64: "{{ hostvars[groups['k8s_masters'][0]]['k8s_join_script'] | default('') }}"
+
+    - name: Fail if join script not available
+      fail:
+        msg: "Join script not found on master. Ensure master play ran successfully and /opt/microk8s-join/join-command.sh exists."
+      when: join_script_b64 == ''
+
+    - name: Write join script to /tmp/join.sh
+      copy:
+        content: "{{ join_script_b64 | b64decode }}"
+        dest: /tmp/join.sh
+        mode: '0755'
+      become: yes
+
+    - name: Run join script
+      shell: /tmp/join.sh
+      register: join_run
+      become: yes
+      ignore_errors: yes
+
+    - name: Show join result
+      debug:
+        var: join_run
+
+    - name: Check cluster nodes after join (run on worker to query master via kubectl)
+      shell: |
+        microk8s kubectl get nodes -o wide
+      register: nodes_after_join
+      changed_when: false
+      become: yes
+      ignore_errors: yes
+
+    - name: Display nodes output
+      debug:
+        msg: "{{ nodes_after_join.stdout | default('no output') }}"
+      when: nodes_after_join is defined

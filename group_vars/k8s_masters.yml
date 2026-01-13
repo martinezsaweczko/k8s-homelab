@@ -1,0 +1,12 @@
+---
+# Kubernetes Master node variables
+k8s_microk8s_channel: "stable"
+
+# Enable DNS for service discovery
+enable_dns: true
+
+# Enable storage for persistent volumes
+enable_storage: true
+
+# Enable RBAC for security
+enable_rbac: true

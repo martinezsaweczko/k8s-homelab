@@ -1,0 +1,317 @@
+---
+# Ceph OSD setup tasks - Simplified for single-node homelab
+
+- name: Install Ceph OSD prerequisites
+  dnf:
+    name:
+      - ceph
+      - ceph-osd
+      - python3-ceph-common
+      - lvm2
+    state: present
+
+- name: Create Ceph OSD directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+    owner: ceph
+    group: ceph
+  loop:
+    - /etc/ceph
+    - /var/lib/ceph/osd
+
+- name: Check if Ceph configuration exists locally
+  stat:
+    path: /etc/ceph/ceph.conf
+  register: ceph_conf_local
+
+- name: Wait for Ceph monitors to be ready
+  pause:
+    seconds: 20
+  when: not ceph_conf_local.stat.exists
+
+- name: Get Ceph configuration from monitor (if not local)
+  slurp:
+    src: /etc/ceph/ceph.conf
+  register: ceph_conf_content
+  delegate_to: "{{ groups['ceph_monitors'][0] }}"
+  when: not ceph_conf_local.stat.exists
+
+- name: Write Ceph configuration to local OSD
+  copy:
+    content: "{{ ceph_conf_content.content | b64decode }}"
+    dest: /etc/ceph/ceph.conf
+    mode: "0644"
+  when:
+    - not ceph_conf_local.stat.exists
+    - ceph_conf_content is defined
+
+- name: Check if Ceph admin keyring exists locally
+  stat:
+    path: /etc/ceph/ceph.client.admin.keyring
+  register: ceph_keyring_local
+
+- name: Get Ceph admin keyring from monitor (if not local)
+  slurp:
+    src: /etc/ceph/ceph.client.admin.keyring
+  register: ceph_admin_keyring_content
+  delegate_to: "{{ groups['ceph_monitors'][0] }}"
+  when: not ceph_keyring_local.stat.exists
+
+- name: Write Ceph admin keyring to local OSD
+  copy:
+    content: "{{ ceph_admin_keyring_content.content | b64decode }}"
+    dest: /etc/ceph/ceph.client.admin.keyring
+    mode: "0600"
+    owner: ceph
+    group: ceph
+  when:
+    - not ceph_keyring_local.stat.exists
+    - ceph_admin_keyring_content is defined
+
+- name: Create bootstrap-osd keyring directory
+  file:
+    path: /var/lib/ceph/bootstrap-osd
+    state: directory
+    mode: "0755"
+    owner: ceph
+    group: ceph
+
+- name: Check if bootstrap-osd keyring exists locally
+  stat:
+    path: /var/lib/ceph/bootstrap-osd/ceph.keyring
+  register: bootstrap_osd_keyring_local
+
+- name: Get bootstrap-osd keyring from monitor (if not local)
+  slurp:
+    src: /var/lib/ceph/bootstrap-osd/ceph.keyring
+  register: ceph_bootstrap_osd_keyring_content
+  delegate_to: "{{ groups['ceph_monitors'][0] }}"
+  when: not bootstrap_osd_keyring_local.stat.exists
+  ignore_errors: yes
+
+- name: Write bootstrap-osd keyring to local OSD
+  copy:
+    content: "{{ ceph_bootstrap_osd_keyring_content.content | b64decode }}"
+    dest: /var/lib/ceph/bootstrap-osd/ceph.keyring
+    mode: "0644"
+    owner: ceph
+    group: ceph
+  when:
+    - not bootstrap_osd_keyring_local.stat.exists
+    - ceph_bootstrap_osd_keyring_content is defined
+
+- name: Check if OSD devices are explicitly configured
+  set_fact:
+    has_osd_devices: "{{ ceph_osd_devices is defined and ceph_osd_devices | length > 0 }}"
+
+- name: Debug OSD device configuration
+  debug:
+    msg: |
+      OSD Configuration:
+      - ceph_osd_devices defined: {{ ceph_osd_devices is defined }}
+      - ceph_osd_devices value: {{ ceph_osd_devices | default('NOT DEFINED') }}
+      - ceph_osd_devices length: {{ ceph_osd_devices | length if ceph_osd_devices is defined else 'N/A' }}
+      - has_osd_devices: {{ has_osd_devices }}
+
+- name: List available block devices (info only)
+  shell: |
+    lsblk -d -n -l -o NAME,SIZE,TYPE | grep -v loop | grep -v zram | head -5 || echo "No devices listed"
+  register: block_devices
+  changed_when: false
+
+- name: Display available devices for reference
+  debug:
+    msg: "Available block devices (for future OSD setup): {{ block_devices.stdout }}"
+
+- name: Display OSD setup mode
+  debug:
+    msg: "Running in monitor-only mode. To enable OSDs, set ceph_osd_devices in group_vars/ceph_osds.yml"
+  when: not has_osd_devices
+
+- name: "Debug: list block devices and LVM info before OSD preparation"
+  shell: |
+    echo "=== lsblk ==="
+    lsblk -o NAME,FSTYPE,SIZE,MOUNTPOINT -a || true
+    echo "\n=== blkid ==="
+    blkid || true
+    echo "\n=== mounted ==="
+    mount | grep -E '^/dev' || true
+    echo "\n=== pvs/vgs/lvs ==="
+    pvs -o pv_name,vg_name --noheadings 2>/dev/null || true
+    vgs --noheadings 2>/dev/null || true
+    lvs --noheadings 2>/dev/null || true
+  register: osd_preflight
+  changed_when: false
+  failed_when: false
+  when: has_osd_devices
+
+- name: Display OSD preflight debug output
+  debug:
+    var: osd_preflight.stdout_lines
+  when: has_osd_devices
+
+- name: Prepare disk for OSD (unmount, wipe signatures and metadata)
+  shell: |
+    set -e
+    DEVICE="{{ item }}"
+    echo "Preparing $DEVICE for Ceph OSD..."
+
+    # Check if device exists
+    if [ ! -e "$DEVICE" ]; then
+      echo "ERROR: Device $DEVICE not found!"
+      exit 1
+    fi
+
+    # Show current mounts and LVM usage for debugging
+    lsblk -o NAME,FSTYPE,SIZE,MOUNTPOINT $DEVICE || true
+    mount | grep "$DEVICE" || true
+
+    # Unmount any mounted partitions
+    for mp in $(lsblk -ln -o MOUNTPOINT ${DEVICE}* | grep -v '^$' || true); do
+      echo "Unmounting $mp"
+      sudo umount -l "$mp" || true
+    done || true
+
+    # Remove any LVM physical volumes / volume groups referencing this device
+    for pv in $(pvs --noheadings -o pv_name 2>/dev/null | awk '{print $1}' || true); do
+      if echo "$pv" | grep -q "$(basename $DEVICE)"; then
+        echo "Removing PV $pv and associated VG"
+        sudo pvremove -ff "$pv" || true
+      fi
+    done || true
+
+    # Wipe filesystem signatures and partition table
+    if wipefs -a "$DEVICE" 2>/dev/null; then
+      echo "wipefs cleared signatures on $DEVICE"
+    fi
+
+    # Use sgdisk to zap the device as fallback
+    sudo sgdisk -Z "$DEVICE" 2>/dev/null || true
+
+    # Flush and rescan
+    sudo partprobe "$DEVICE" 2>/dev/null || true
+    sudo dd if=/dev/zero of="$DEVICE" bs=1M count=100 2>/dev/null || true
+    sudo sync || true
+    sleep 2
+  loop: "{{ ceph_osd_devices }}"
+  when:
+    - has_osd_devices
+    - ceph_osd_devices is defined
+    - ceph_osd_devices | length > 0
+  become: yes
+  ignore_errors: yes
+
+- name: Prepare OSD devices (if available)
+  shell: |
+    ceph-volume lvm create --data {{ item }}
+  loop: "{{ ceph_osd_devices }}"
+  when:
+    - has_osd_devices
+    - ceph_osd_devices is defined
+    - ceph_osd_devices | length > 0
+  ignore_errors: yes
+
+- name: Discover prepared OSD FSIDs
+  shell: |
+    ceph-volume lvm list 2>/dev/null | awk '/osd fsid/{print $3}'
+  register: prepared_osd_fsids
+  changed_when: false
+  ignore_errors: yes
+
+- name: Activate prepared OSDs by FSID
+  shell: |
+    ceph-volume lvm activate {{ item }}
+  loop: "{{ prepared_osd_fsids.stdout_lines | default([]) }}"
+  when:
+    - has_osd_devices
+    - prepared_osd_fsids.stdout_lines | length > 0
+  ignore_errors: yes
+
+- name: Discover OSD ids for started OSDs
+  shell: |
+    ceph-volume lvm list 2>/dev/null | awk '/osd id/{print $3}'
+  register: discovered_osd_ids
+  changed_when: false
+  ignore_errors: yes
+  when:
+    - has_osd_devices
+
+- name: Enable Ceph OSD services for discovered OSD ids
+  systemd:
+    name: "ceph-osd@{{ item }}"
+    state: started
+    enabled: yes
+    daemon_reload: yes
+  loop: "{{ discovered_osd_ids.stdout_lines | default([]) }}"
+  when:
+    - has_osd_devices
+    - discovered_osd_ids.stdout_lines | length > 0
+  ignore_errors: yes
+
+- name: Wait for OSDs to join cluster
+  shell: |
+    ceph osd tree 2>/dev/null | grep -q "up" || ceph -s | grep -q "osd: 1"
+  register: osds_status
+  until: osds_status.rc == 0
+  retries: 10
+  delay: 3
+  ignore_errors: yes
+  when:
+    - has_osd_devices
+    - discovered_osd_ids.stdout_lines | length > 0
+
+- name: Confirm monitor-only setup
+  debug:
+    msg: "Monitor-only Ceph setup active. RBD pool will be available for Kubernetes persistence."
+  when: not has_osd_devices
+
+- name: Verify kubernetes pool exists (created by monitor role)
+  shell: |
+    for i in {1..20}; do
+      if timeout 10 ceph osd pool ls 2>/dev/null | grep -q kubernetes; then
+        echo "pool exists"
+        exit 0
+      fi
+      echo "Attempt $i/20: Creating pool..."
+      timeout 10 ceph osd pool create kubernetes 32 32 --autoscale-mode on 2>/dev/null || true
+      sleep 3
+    done
+    echo "pool-creation-timeout"
+  register: pool_check
+  changed_when: "'timeout' not in pool_check.stdout"
+  ignore_errors: yes
+  when: inventory_hostname == groups['ceph_monitors'][0]
+
+- name: Initialize RBD pool
+  shell: |
+    timeout 10 rbd pool init kubernetes 2>/dev/null || true
+  ignore_errors: yes
+  when: inventory_hostname == groups['ceph_monitors'][0]
+
+- name: Create Ceph RBD client for Kubernetes
+  shell: |
+    timeout 10 ceph auth get-or-create client.kubernetes \
+      mon 'profile rbd' \
+      osd 'profile rbd pool=kubernetes' 2>/dev/null || true
+  register: ceph_client_key
+  changed_when: false
+  ignore_errors: yes
+  when: inventory_hostname == groups['ceph_monitors'][0]
+
+- name: Display Ceph RBD client key
+  debug:
+    msg: "{{ ceph_client_key.stdout }}"
+  ignore_errors: yes
+
+- name: Display OSD cluster status
+  shell: |
+    timeout 15 ceph -s || echo "Monitor not responding (timeout)"
+  register: ceph_osd_status
+  changed_when: false
+  ignore_errors: yes
+
+- name: Show Ceph OSD status
+  debug:
+    msg: "{{ ceph_osd_status.stdout }}"

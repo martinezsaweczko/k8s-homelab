@@ -1,0 +1,21 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: ceph-rbd
+provisioner: kubernetes.io/rbd
+parameters:
+  monitors: {% for host in groups['ceph_monitors'] %}{{ hostvars[host].ansible_host }}:6789{% if not loop.last %},{% endif %}{% endfor %}
+
+  adminId: admin
+  adminSecretName: ceph-admin-secret
+  adminSecretNamespace: ceph-storage
+  pool: kubernetes
+  userId: kubernetes
+  userSecretName: ceph-user-secret
+  userSecretNamespace: ceph-storage
+  fstype: ext4
+  imageFormat: "2"
+  imageFeatures: layering
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+volumeBindingMode: Immediate

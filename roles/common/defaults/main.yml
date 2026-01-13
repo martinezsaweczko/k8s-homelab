@@ -1,0 +1,4 @@
+---
+# Common defaults
+update_packages: true
+timezone: UTC

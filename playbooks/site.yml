@@ -1,0 +1,19 @@
+---
+# Bootstrap playbook to install required dependencies
+- import_playbook: bootstrap.yml
+
+# Main playbook to orchestrate the full setup
+- name: Configure all hosts
+  hosts: all
+  serial: 1
+  roles:
+    - common
+
+- name: Setup Kubernetes cluster
+  import_playbook: kubernetes.yml
+
+- name: Setup Ceph cluster
+  import_playbook: ceph.yml
+
+- name: Setup Ceph CSI RBD for Kubernetes integration
+  import_playbook: k8s-ceph-csi.yml

@@ -1,0 +1,131 @@
+---
+- name: Clean up existing test resources
+  kubernetes.core.k8s:
+    state: absent
+    kind: "{{ item.kind }}"
+    namespace: "{{ ceph_k8s_namespace }}"
+    name: "{{ item.name }}"
+    kubeconfig: "{{ kubeconfig_path }}"
+  loop:
+    - { kind: Pod, name: ceph-test-pod }
+    - { kind: PersistentVolumeClaim, name: ceph-test-pvc }
+  ignore_errors: true
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+
+- name: Wait for resources to be cleaned up
+  pause:
+    seconds: 2
+
+- name: Create test PVC
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: ceph-test-pvc
+        namespace: "{{ ceph_k8s_namespace }}"
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: "{{ ceph_csi_storage_class }}"
+        resources:
+          requests:
+            storage: "{{ ceph_csi_test_pvc_size }}"
+    kubeconfig: "{{ kubeconfig_path }}"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+
+- name: Wait for PVC to bind
+  kubernetes.core.k8s_info:
+    kind: PersistentVolumeClaim
+    namespace: "{{ ceph_k8s_namespace }}"
+    name: ceph-test-pvc
+    kubeconfig: "{{ kubeconfig_path }}"
+    wait: true
+    wait_condition:
+      type: Bound
+      status: "True"
+    wait_sleep: 5
+    wait_timeout: 120
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: pvc_bound
+
+- name: Create test Pod
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: ceph-test-pod
+        namespace: "{{ ceph_k8s_namespace }}"
+      spec:
+        containers:
+          - name: test-container
+            image: "{{ ceph_csi_test_pod_image }}"
+            command: ["sh", "-c", "while true; do sleep 1; done"]
+            volumeMounts:
+              - name: ceph-volume
+                mountPath: /data
+        volumes:
+          - name: ceph-volume
+            persistentVolumeClaim:
+              claimName: ceph-test-pvc
+    kubeconfig: "{{ kubeconfig_path }}"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+
+- name: Wait for test Pod to be ready
+  kubernetes.core.k8s_info:
+    kind: Pod
+    namespace: "{{ ceph_k8s_namespace }}"
+    name: ceph-test-pod
+    kubeconfig: "{{ kubeconfig_path }}"
+    wait: true
+    wait_condition:
+      type: Ready
+      status: "True"
+    wait_sleep: 5
+    wait_timeout: 120
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: test_pod_ready
+
+- name: Write test file to Ceph volume
+  kubernetes.core.k8s_exec:
+    namespace: "{{ ceph_k8s_namespace }}"
+    pod: ceph-test-pod
+    command: 'sh -c ''echo "Hello from Kubernetes at $(date)" > /data/test.txt'''
+    kubeconfig: "{{ kubeconfig_path }}"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+
+- name: Read test file from Ceph volume
+  kubernetes.core.k8s_exec:
+    namespace: "{{ ceph_k8s_namespace }}"
+    pod: ceph-test-pod
+    command: "cat /data/test.txt"
+    kubeconfig: "{{ kubeconfig_path }}"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: test_file_content
+
+- name: Display test results
+  debug:
+    msg:
+      - "=========================================="
+      - "✓ K8s + Ceph Integration Test Passed!"
+      - "=========================================="
+      - ""
+      - "Test file content:"
+      - "{{ test_file_content.stdout }}"
+      - ""
+      - "PVC Details:"
+      - "  Name: ceph-test-pvc"
+      - "  Namespace: {{ ceph_k8s_namespace }}"
+      - "  Size: {{ ceph_csi_test_pvc_size }}"
+      - "  StorageClass: {{ ceph_csi_storage_class }}"
+      - ""

@@ -1,0 +1,4 @@
+---
+# Ceph OSD defaults
+ceph_osds_count: 1
+ceph_osd_devices: []

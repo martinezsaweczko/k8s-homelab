@@ -1,0 +1,24 @@
+[global]
+fsid = {{ ceph_cluster_fsid }}
+mon_initial_members = {% for host in groups['ceph_monitors'] %}{{ hostvars[host].inventory_hostname }}{{ "," if not loop.last }}{% endfor %}
+
+mon_host = {{ mon_host }}
+public_network = {{ ceph_public_network | default('0.0.0.0/0') }}
+auth_cluster_required = cephx
+auth_service_required = cephx
+auth_client_required = cephx
+
+# Performance tuning
+osd_journal_size = 5120
+osd_pool_default_size = 3
+osd_pool_default_min_size = 2
+osd_pool_default_pg_num = 128
+osd_pool_default_pgp_num = 128
+
+# Bluestore backend (recommended)
+osd_objectstore = bluestore
+
+# Recovery tuning
+osd_recovery_max_active = 3
+osd_max_backfills = 1
+osd_recovery_sleep = 0.1
