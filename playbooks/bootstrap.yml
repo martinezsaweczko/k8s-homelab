@@ -1,22 +1,22 @@
 ---
 - name: Bootstrap - Install required Python modules
   hosts: all
-  gather_facts: no
-  become: yes
+  gather_facts: false
+  become: true
   tasks:
     - name: Stop and disable firewalld
-      raw: dnf remove -y firewalld || true
+      ansible.builtin.raw: dnf remove -y firewalld || true
       register: firewalld_remove
       changed_when: '"Complete!" in firewalld_remove.stdout or "Removed" in firewalld_remove.stdout'
-      ignore_errors: yes
+      ignore_errors: true
 
     - name: Install required Python packages
-      raw: dnf install -y python3-dnf python3-setuptools python3-pip
+      ansible.builtin.raw: dnf install -y python3-dnf python3-setuptools python3-pip
       register: dnf_install
       changed_when: '"Complete!" in dnf_install.stdout'
 
     - name: Ensure OpenSSL is installed (required by Helm installer to verify checksums)
-      raw: |
+      ansible.builtin.raw: |
         if ! rpm -q openssl &> /dev/null; then
           dnf install -y openssl
         else
@@ -26,7 +26,7 @@
       changed_when: '"installed" in openssl_install.stdout.lower() or "installed" in openssl_install.stderr.lower()'
 
     - name: Ensure Git is installed (required by Helm installer)
-      raw: |
+      ansible.builtin.raw: |
         if ! rpm -q git &> /dev/null; then
           dnf install -y git
         else
@@ -36,7 +36,7 @@
       changed_when: '"installed" in git_install.stdout.lower() or "installed" in git_install.stderr.lower()'
 
     - name: Ensure tar is installed (required by Helm installer)
-      raw: |
+      ansible.builtin.raw: |
         if ! rpm -q tar &> /dev/null; then
           dnf install -y tar
         else
@@ -46,7 +46,7 @@
       changed_when: '"installed" in tar_install.stdout.lower() or "installed" in tar_install.stderr.lower()'
 
     - name: Install Helm for Kubernetes package management
-      raw: |
+      ansible.builtin.raw: |
         if ! command -v helm &> /dev/null; then
           curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
         else
@@ -54,7 +54,7 @@
         fi
       register: helm_install
       changed_when: '"installed" in helm_install.stdout.lower() or "downloaded" in helm_install.stdout.lower()'
-      ignore_errors: yes
+      ignore_errors: true
 
     - name: Gather facts after bootstrap
-      setup:
+      ansible.builtin.setup:

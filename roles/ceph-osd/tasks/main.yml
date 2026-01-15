@@ -2,7 +2,7 @@
 # Ceph OSD setup tasks - Simplified for single-node homelab
 
 - name: Install Ceph OSD prerequisites
-  dnf:
+  ansible.builtin.dnf:
     name:
       - ceph
       - ceph-osd
@@ -11,7 +11,7 @@
     state: present
 
 - name: Create Ceph OSD directories
-  file:
+  ansible.builtin.file:
     path: "{{ item }}"
     state: directory
     mode: "0755"
@@ -22,24 +22,24 @@
     - /var/lib/ceph/osd
 
 - name: Check if Ceph configuration exists locally
-  stat:
+  ansible.builtin.stat:
     path: /etc/ceph/ceph.conf
   register: ceph_conf_local
 
 - name: Wait for Ceph monitors to be ready
-  pause:
+  ansible.builtin.pause:
     seconds: 20
-  when: not ceph_conf_local.stat.exists
+  when: falset ceph_conf_local.stat.exists
 
 - name: Get Ceph configuration from monitor (if not local)
-  slurp:
+  ansible.builtin.slurp:
     src: /etc/ceph/ceph.conf
   register: ceph_conf_content
   delegate_to: "{{ groups['ceph_monitors'][0] }}"
-  when: not ceph_conf_local.stat.exists
+  when: falset ceph_conf_local.stat.exists
 
 - name: Write Ceph configuration to local OSD
-  copy:
+  ansible.builtin.copy:
     content: "{{ ceph_conf_content.content | b64decode }}"
     dest: /etc/ceph/ceph.conf
     mode: "0644"
@@ -48,19 +48,19 @@
     - ceph_conf_content is defined
 
 - name: Check if Ceph admin keyring exists locally
-  stat:
+  ansible.builtin.stat:
     path: /etc/ceph/ceph.client.admin.keyring
   register: ceph_keyring_local
 
 - name: Get Ceph admin keyring from monitor (if not local)
-  slurp:
+  ansible.builtin.slurp:
     src: /etc/ceph/ceph.client.admin.keyring
   register: ceph_admin_keyring_content
   delegate_to: "{{ groups['ceph_monitors'][0] }}"
-  when: not ceph_keyring_local.stat.exists
+  when: falset ceph_keyring_local.stat.exists
 
 - name: Write Ceph admin keyring to local OSD
-  copy:
+  ansible.builtin.copy:
     content: "{{ ceph_admin_keyring_content.content | b64decode }}"
     dest: /etc/ceph/ceph.client.admin.keyring
     mode: "0600"
@@ -71,7 +71,7 @@
     - ceph_admin_keyring_content is defined
 
 - name: Create bootstrap-osd keyring directory
-  file:
+  ansible.builtin.file:
     path: /var/lib/ceph/bootstrap-osd
     state: directory
     mode: "0755"
@@ -79,20 +79,20 @@
     group: ceph
 
 - name: Check if bootstrap-osd keyring exists locally
-  stat:
+  ansible.builtin.stat:
     path: /var/lib/ceph/bootstrap-osd/ceph.keyring
   register: bootstrap_osd_keyring_local
 
 - name: Get bootstrap-osd keyring from monitor (if not local)
-  slurp:
+  ansible.builtin.slurp:
     src: /var/lib/ceph/bootstrap-osd/ceph.keyring
   register: ceph_bootstrap_osd_keyring_content
   delegate_to: "{{ groups['ceph_monitors'][0] }}"
-  when: not bootstrap_osd_keyring_local.stat.exists
-  ignore_errors: yes
+  when: falset bootstrap_osd_keyring_local.stat.exists
+  ignore_errors: true
 
 - name: Write bootstrap-osd keyring to local OSD
-  copy:
+  ansible.builtin.copy:
     content: "{{ ceph_bootstrap_osd_keyring_content.content | b64decode }}"
     dest: /var/lib/ceph/bootstrap-osd/ceph.keyring
     mode: "0644"
@@ -103,11 +103,11 @@
     - ceph_bootstrap_osd_keyring_content is defined
 
 - name: Check if OSD devices are explicitly configured
-  set_fact:
+  ansible.builtin.set_fact:
     has_osd_devices: "{{ ceph_osd_devices is defined and ceph_osd_devices | length > 0 }}"
 
 - name: Debug OSD device configuration
-  debug:
+  ansible.builtin.debug:
     msg: |
       OSD Configuration:
       - ceph_osd_devices defined: {{ ceph_osd_devices is defined }}
@@ -116,22 +116,24 @@
       - has_osd_devices: {{ has_osd_devices }}
 
 - name: List available block devices (info only)
-  shell: |
+  ansible.builtin.shell: |
+    set -o pipefail
     lsblk -d -n -l -o NAME,SIZE,TYPE | grep -v loop | grep -v zram | head -5 || echo "No devices listed"
   register: block_devices
   changed_when: false
 
 - name: Display available devices for reference
-  debug:
+  ansible.builtin.debug:
     msg: "Available block devices (for future OSD setup): {{ block_devices.stdout }}"
 
 - name: Display OSD setup mode
-  debug:
+  ansible.builtin.debug:
     msg: "Running in monitor-only mode. To enable OSDs, set ceph_osd_devices in group_vars/ceph_osds.yml"
-  when: not has_osd_devices
+  when: falset has_osd_devices
 
 - name: "Debug: list block devices and LVM info before OSD preparation"
-  shell: |
+  ansible.builtin.shell: |
+    set -o pipefail
     echo "=== lsblk ==="
     lsblk -o NAME,FSTYPE,SIZE,MOUNTPOINT -a || true
     echo "\n=== blkid ==="
@@ -144,17 +146,17 @@
     lvs --noheadings 2>/dev/null || true
   register: osd_preflight
   changed_when: false
-  failed_when: false
   when: has_osd_devices
 
 - name: Display OSD preflight debug output
-  debug:
+  ansible.builtin.debug:
     var: osd_preflight.stdout_lines
   when: has_osd_devices
 
 - name: Prepare disk for OSD (unmount, wipe signatures and metadata)
-  shell: |
+  ansible.builtin.shell: |
     set -e
+    set -o pipefail
     DEVICE="{{ item }}"
     echo "Preparing $DEVICE for Ceph OSD..."
 
@@ -200,75 +202,81 @@
     - has_osd_devices
     - ceph_osd_devices is defined
     - ceph_osd_devices | length > 0
-  become: yes
-  ignore_errors: yes
+  become: true
+  changed_when: true
+  failed_when: false
 
 - name: Prepare OSD devices (if available)
-  shell: |
+  ansible.builtin.shell: |
     ceph-volume lvm create --data {{ item }}
   loop: "{{ ceph_osd_devices }}"
   when:
     - has_osd_devices
     - ceph_osd_devices is defined
     - ceph_osd_devices | length > 0
-  ignore_errors: yes
+  changed_when: true
+  failed_when: false
 
 - name: Discover prepared OSD FSIDs
-  shell: |
+  ansible.builtin.shell: |
     ceph-volume lvm list 2>/dev/null | awk '/osd fsid/{print $3}'
   register: prepared_osd_fsids
   changed_when: false
-  ignore_errors: yes
+  ignore_errors: true
 
 - name: Activate prepared OSDs by FSID
-  shell: |
+  ansible.builtin.shell: |
     ceph-volume lvm activate {{ item }}
   loop: "{{ prepared_osd_fsids.stdout_lines | default([]) }}"
   when:
     - has_osd_devices
     - prepared_osd_fsids.stdout_lines | length > 0
-  ignore_errors: yes
+  changed_when: true
+  failed_when: false
 
 - name: Discover OSD ids for started OSDs
-  shell: |
+  ansible.builtin.shell: |
     ceph-volume lvm list 2>/dev/null | awk '/osd id/{print $3}'
   register: discovered_osd_ids
   changed_when: false
-  ignore_errors: yes
+  ignore_errors: true
   when:
     - has_osd_devices
 
 - name: Enable Ceph OSD services for discovered OSD ids
-  systemd:
+  ansible.builtin.systemd:
     name: "ceph-osd@{{ item }}"
     state: started
-    enabled: yes
-    daemon_reload: yes
+    enabled: true
+    daemon_reload: true
   loop: "{{ discovered_osd_ids.stdout_lines | default([]) }}"
   when:
     - has_osd_devices
     - discovered_osd_ids.stdout_lines | length > 0
-  ignore_errors: yes
+  failed_when: false
 
 - name: Wait for OSDs to join cluster
-  shell: |
+  ansible.builtin.shell: |
+    set -o pipefail
     ceph osd tree 2>/dev/null | grep -q "up" || ceph -s | grep -q "osd: 1"
   register: osds_status
   until: osds_status.rc == 0
   retries: 10
   delay: 3
-  ignore_errors: yes
+  changed_when: false
+  failed_when: false
   when:
     - has_osd_devices
     - discovered_osd_ids.stdout_lines | length > 0
 
 - name: Confirm monitor-only setup
-  debug:
+  ansible.builtin.debug:
     msg: "Monitor-only Ceph setup active. RBD pool will be available for Kubernetes persistence."
-  when: not has_osd_devices
+  when: falset has_osd_devices
 
 - name: Verify kubernetes pool exists (created by monitor role)
-  shell: |
+  ansible.builtin.shell: |
+    set -o pipefail
     for i in {1..20}; do
       if timeout 10 ceph osd pool ls 2>/dev/null | grep -q kubernetes; then
         echo "pool exists"
@@ -281,37 +289,38 @@
     echo "pool-creation-timeout"
   register: pool_check
   changed_when: "'timeout' not in pool_check.stdout"
-  ignore_errors: yes
+  failed_when: false
   when: inventory_hostname == groups['ceph_monitors'][0]
 
 - name: Initialize RBD pool
-  shell: |
+  ansible.builtin.shell: |
     timeout 10 rbd pool init kubernetes 2>/dev/null || true
-  ignore_errors: yes
+  changed_when: true
+  failed_when: false
   when: inventory_hostname == groups['ceph_monitors'][0]
 
 - name: Create Ceph RBD client for Kubernetes
-  shell: |
+  ansible.builtin.shell: |
     timeout 10 ceph auth get-or-create client.kubernetes \
       mon 'profile rbd' \
       osd 'profile rbd pool=kubernetes' 2>/dev/null || true
   register: ceph_client_key
   changed_when: false
-  ignore_errors: yes
+  ignore_errors: true
   when: inventory_hostname == groups['ceph_monitors'][0]
 
 - name: Display Ceph RBD client key
-  debug:
+  ansible.builtin.debug:
     msg: "{{ ceph_client_key.stdout }}"
-  ignore_errors: yes
+  failed_when: false
 
 - name: Display OSD cluster status
-  shell: |
+  ansible.builtin.shell: |
     timeout 15 ceph -s || echo "Monitor not responding (timeout)"
   register: ceph_osd_status
   changed_when: false
-  ignore_errors: yes
+  ignore_errors: true
 
 - name: Show Ceph OSD status
-  debug:
+  ansible.builtin.debug:
     msg: "{{ ceph_osd_status.stdout }}"

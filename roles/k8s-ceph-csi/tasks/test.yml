@@ -9,12 +9,12 @@
   loop:
     - { kind: Pod, name: ceph-test-pod }
     - { kind: PersistentVolumeClaim, name: ceph-test-pvc }
-  ignore_errors: true
+  failed_when: false
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
 
 - name: Wait for resources to be cleaned up
-  pause:
+  ansible.builtin.pause:
     seconds: 2
 
 - name: Create test PVC
@@ -114,7 +114,7 @@
   register: test_file_content
 
 - name: Display test results
-  debug:
+  ansible.builtin.debug:
     msg:
       - "=========================================="
       - "✓ K8s + Ceph Integration Test Passed!"

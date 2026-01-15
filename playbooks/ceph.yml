@@ -13,4 +13,4 @@
 - name: Integrate Ceph with Kubernetes
   hosts: k8s_masters
   roles:
-    - ceph-k8s-integration
+    - ceph_k8s_integration

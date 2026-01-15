@@ -1,53 +1,53 @@
 ---
 # Common tasks for all hosts
 - name: Stop and disable firewalld
-  systemd:
+  ansible.builtin.systemd:
     name: firewalld
     state: stopped
-    enabled: no
-  ignore_errors: yes
+    enabled: false
+  failed_when: false
 
 - name: Remove firewalld package
-  dnf:
+  ansible.builtin.dnf:
     name: firewalld
     state: absent
-  ignore_errors: yes
+  failed_when: false
 
 - name: Set hostname
   block:
     - name: Set hostname using hostnamectl
-      shell: |
+      ansible.builtin.shell: |
         hostnamectl set-hostname {{ node_hostname | default(inventory_hostname) }}
       changed_when: true
-      when: node_hostname is defined
+      when: falsede_hostname is defined
 
     - name: Update /etc/hostname file
-      copy:
+      ansible.builtin.copy:
         content: "{{ node_hostname | default(inventory_hostname) }}\n"
         dest: /etc/hostname
         mode: "0644"
-      when: node_hostname is defined
+      when: falsede_hostname is defined
 
     - name: Verify hostname is set
-      shell: |
+      ansible.builtin.shell: |
         hostname -f
       register: hostname_verify
       changed_when: false
-      when: node_hostname is defined
+      when: falsede_hostname is defined
 
     - name: Display hostname
-      debug:
+      ansible.builtin.debug:
         msg: "Hostname set to: {{ hostname_verify.stdout }}"
-      when: node_hostname is defined
+      when: falsede_hostname is defined
 
 - name: Update package cache
-  dnf:
+  ansible.builtin.dnf:
     name: "*"
-    state: latest
+    state: present
   when: update_packages | default(true)
 
 - name: Install basic packages
-  dnf:
+  ansible.builtin.dnf:
     name:
       - curl
       - wget
@@ -64,25 +64,26 @@
     state: present
 
 - name: Set timezone
-  timezone:
+  community.general.timezone:
     name: "{{ timezone | default('UTC') }}"
 
 # Kubernetes prerequisites - OS configuration
 - name: Disable swap permanently
   block:
     - name: Turn off swap
-      shell: swapoff -a
+      ansible.builtin.command: swapoff -a
       when: ansible_swaptotal_mb > 0
+      changed_when: false
 
     - name: Remove swap from fstab
-      lineinfile:
+      ansible.builtin.lineinfile:
         path: /etc/fstab
         regexp: '^([^#].*?\s+swap\s+.*)$'
         line: '# \1'
-        backrefs: yes
+        backrefs: true
 
 - name: Load kernel modules required for Kubernetes
-  modprobe:
+  community.general.modprobe:
     name: "{{ item }}"
     state: present
   loop:
@@ -90,11 +91,11 @@
     - br_netfilter
 
 - name: Configure sysctl for Kubernetes
-  sysctl:
+  ansible.posix.sysctl:
     name: "{{ item.key }}"
     value: "{{ item.value }}"
     state: present
-    reload: yes
+    reload: true
   with_dict:
     net.bridge.bridge-nf-call-iptables: "1"
     net.bridge.bridge-nf-call-ip6tables: "1"
@@ -104,7 +105,7 @@
     kernel.panic_on_oops: "1"
 
 - name: Configure system limits for Kubernetes
-  lineinfile:
+  ansible.builtin.lineinfile:
     path: /etc/security/limits.conf
     line: "{{ item }}"
     insertbefore: "^# End of file"
@@ -115,18 +116,19 @@
     - "*       hard    nproc       65536"
 
 - name: Apply limits to current session
-  shell: |
+  ansible.builtin.shell: |
     ulimit -n 65536
     ulimit -u 65536
+  changed_when: false
 
 - name: Ensure /etc/modules-load.d directory exists
-  file:
+  ansible.builtin.file:
     path: /etc/modules-load.d
     state: directory
     mode: "0755"
 
 - name: Persist kernel modules across reboots
-  copy:
+  ansible.builtin.copy:
     content: |
       overlay
       br_netfilter
@@ -134,7 +136,7 @@
     mode: "0644"
 
 - name: Install Python dependencies for Ansible
-  pip:
+  ansible.builtin.pip:
     name:
       - pyyaml
       - jsonpatch

@@ -1,6 +1,7 @@
 ---
 # Bootstrap playbook to install required dependencies
-- import_playbook: bootstrap.yml
+- name: Bootstrap playbook
+  import_playbook: bootstrap.yml
 
 # Main playbook to orchestrate the full setup
 - name: Configure all hosts

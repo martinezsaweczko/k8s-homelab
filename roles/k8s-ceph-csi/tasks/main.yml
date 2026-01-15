@@ -1,14 +1,14 @@
 ---
 - name: Check if kubeconfig exists
-  stat:
+  ansible.builtin.stat:
     path: "{{ kubeconfig_path }}"
   register: kubeconfig_stat
   become: false
 
 - name: Fail if kubeconfig not found
-  fail:
+  ansible.builtin.fail:
     msg: "Kubeconfig not found at {{ kubeconfig_path }}. Please ensure Kubernetes is running and kubeconfig is copied."
-  when: not kubeconfig_stat.stat.exists
+  when: falset kubeconfig_stat.stat.exists
 
 - name: Create ceph-csi-rbd namespace
   kubernetes.core.k8s:
@@ -29,21 +29,21 @@
     KUBECONFIG: "{{ kubeconfig_path }}"
 
 - name: Get Ceph FSId
-  command: sudo ceph fsid
+  ansible.builtin.command: sudo ceph fsid
   register: ceph_fsid
   changed_when: false
 
 - name: Get Ceph monitor addresses (JSON)
-  command: sudo ceph mon dump -f json
+  ansible.builtin.command: sudo ceph mon dump -f json
   register: ceph_mon_dump
   changed_when: false
 
 - name: Build monitor list from mon dump
-  set_fact:
-    ceph_monitors: "{{ (ceph_mon_dump.stdout | from_json).mons | map(attribute='addr') | map('regex_replace','/.*$','') | join(',') }}"
+  ansible.builtin.set_fact:
+    ceph_monitors: "{{ (ceph_mon_dump.stdout | from_json).mons | map(attribute='addr') | map('regex_replace', '/.*$', '') | join(',') }}"
 
 - name: Get Ceph client.kubernetes key
-  command: sudo ceph auth get-key client.kubernetes
+  ansible.builtin.command: sudo ceph auth get-key client.kubernetes
   register: ceph_client_key
   changed_when: false
   no_log: true
@@ -93,13 +93,13 @@
   no_log: true
 
 - name: Detect ready Kubernetes nodes
-  command: kubectl --kubeconfig {{ kubeconfig_path }} get nodes --no-headers 2>/dev/null | awk '$2=="Ready" {print $1}' | wc -l
+  ansible.builtin.command: kubectl --kubeconfig {{ kubeconfig_path }} get nodes --no-headers 2>/dev/null | awk '$2=="Ready" {print $1}' | wc -l
   register: ready_nodes
   changed_when: false
   failed_when: false
 
 - name: Set provisioner replicas based on node count
-  set_fact:
+  ansible.builtin.set_fact:
     ceph_csi_provisioner_replicas: "{{ 1 if (ready_nodes.stdout | int) <= 1 else 3 }}"
 
 - name: Install Ceph CSI RBD driver via Helm
@@ -175,7 +175,7 @@
     KUBECONFIG: "{{ kubeconfig_path }}"
 
 - name: Display CSI RBD installation summary
-  debug:
+  ansible.builtin.debug:
     msg:
       - "=========================================="
       - "✓ Ceph CSI RBD Driver Installed"
@@ -193,5 +193,5 @@
       - ""
 
 - name: Test CSI RBD with PVC
-  include_tasks: test.yml
+  ansible.builtin.include_tasks: test.yml
   when: enable_ceph_csi_test | bool
