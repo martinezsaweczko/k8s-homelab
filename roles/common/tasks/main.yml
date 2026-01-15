@@ -19,31 +19,30 @@
       ansible.builtin.shell: |
         hostnamectl set-hostname {{ node_hostname | default(inventory_hostname) }}
       changed_when: true
-      when: falsede_hostname is defined
+      when: node_hostname is defined
 
     - name: Update /etc/hostname file
       ansible.builtin.copy:
         content: "{{ node_hostname | default(inventory_hostname) }}\n"
         dest: /etc/hostname
         mode: "0644"
-      when: falsede_hostname is defined
+      when: node_hostname is defined
 
     - name: Verify hostname is set
       ansible.builtin.shell: |
         hostname -f
       register: hostname_verify
       changed_when: false
-      when: falsede_hostname is defined
+      when: node_hostname is defined
 
     - name: Display hostname
       ansible.builtin.debug:
         msg: "Hostname set to: {{ hostname_verify.stdout }}"
-      when: falsede_hostname is defined
+      when: node_hostname is defined
 
 - name: Update package cache
   ansible.builtin.dnf:
-    name: "*"
-    state: present
+    update_cache: true
   when: update_packages | default(true)
 
 - name: Install basic packages

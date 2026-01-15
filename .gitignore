@@ -34,3 +34,12 @@ env/
 .DS_Store
 .AppleDouble
 .LSOverride
+
+
+# Vagrant
+.vagrant/
+vagrant/.vagrant/
+
+# Vagrant disks
+vagrant/vagrant_disks/
+*.vdi
