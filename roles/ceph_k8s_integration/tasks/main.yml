@@ -21,10 +21,10 @@
   failed_when:
     - ceph_k8s_integration_create_ns.rc != 0
     - "'AlreadyExists' not in (ceph_k8s_integration_create_ns.stderr | default(''))"
-  changed_when:
-    - ceph_k8s_integration_create_ns.rc == 0
-    - "'created' in (ceph_k8s_integration_create_ns.stdout | default('')) or
-       'configured' in (ceph_k8s_integration_create_ns.stdout | default(''))"
+  changed_when: >
+    ceph_k8s_integration_create_ns.rc == 0 and
+    ("created" in (ceph_k8s_integration_create_ns.stdout | default('')) or
+    "configured" in (ceph_k8s_integration_create_ns.stdout | default('')))
 
 - name: Check Ceph admin keyring on Ceph monitor
   ansible.builtin.stat:

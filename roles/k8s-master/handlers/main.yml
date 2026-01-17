@@ -1,0 +1,6 @@
+---
+# Handlers for k8s-master role
+
+- name: Wait for MicroK8s to initialize
+  ansible.builtin.pause:
+    seconds: 30

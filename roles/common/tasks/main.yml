@@ -31,13 +31,13 @@
     - name: Verify hostname is set
       ansible.builtin.shell: |
         hostname -f
-      register: hostname_verify
+      register: common_hostname_verify
       changed_when: false
       when: node_hostname is defined
 
     - name: Display hostname
       ansible.builtin.debug:
-        msg: "Hostname set to: {{ hostname_verify.stdout }}"
+        msg: "Hostname set to: {{ common_hostname_verify.stdout }}"
       when: node_hostname is defined
 
 - name: Update package cache

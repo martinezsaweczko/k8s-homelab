@@ -44,11 +44,7 @@
       until: microk8s_install is succeeded
       retries: 3
       delay: 10
-
-    - name: Wait for MicroK8s to initialize
-      ansible.builtin.pause:
-        seconds: 30
-      when: microk8s_install.changed
+      notify: Wait for MicroK8s to initialize
 
     - name: Add user to microk8s group
       ansible.builtin.user:
@@ -211,6 +207,7 @@
   block:
     - name: Wait for cluster to stabilize before adding nodes
       ansible.builtin.shell: |
+        set -o pipefail
         for i in {1..30}; do
           if microk8s kubectl get nodes 2>&1 | grep -q "Ready"; then
             echo "Cluster is ready"
