@@ -43,7 +43,7 @@
 - name: Update package cache
   ansible.builtin.dnf:
     update_cache: true
-  when: update_packages | default(true)
+  when: common_update_packages | default(true)
 
 - name: Install basic packages
   ansible.builtin.dnf:
@@ -64,7 +64,7 @@
 
 - name: Set timezone
   community.general.timezone:
-    name: "{{ timezone | default('UTC') }}"
+    name: "{{ common_timezone | default('UTC') }}"
 
 # Kubernetes prerequisites - OS configuration
 - name: Disable swap permanently

@@ -1,4 +1,4 @@
 ---
 # Common defaults
-update_packages: true
-timezone: UTC
+common_update_packages: true
+common_timezone: UTC

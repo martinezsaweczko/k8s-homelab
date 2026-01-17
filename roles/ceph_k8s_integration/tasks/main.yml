@@ -17,21 +17,26 @@
     microk8s kubectl apply -f -
   environment:
     KUBECONFIG: /var/snap/microk8s/current/credentials/client.config
-  register: create_ns
-  failed_when: create_ns.rc != 0 and 'AlreadyExists' not in (create_ns.stderr | default(''))
-  changed_when: create_ns.rc == 0 and ("created" in (create_ns.stdout | default('')) or "configured" in (create_ns.stdout | default('')))
+  register: ceph_k8s_integration_create_ns
+  failed_when:
+    - ceph_k8s_integration_create_ns.rc != 0
+    - "'AlreadyExists' not in (ceph_k8s_integration_create_ns.stderr | default(''))"
+  changed_when:
+    - ceph_k8s_integration_create_ns.rc == 0
+    - "'created' in (ceph_k8s_integration_create_ns.stdout | default('')) or
+       'configured' in (ceph_k8s_integration_create_ns.stdout | default(''))"
 
 - name: Check Ceph admin keyring on Ceph monitor
   ansible.builtin.stat:
     path: /etc/ceph/ceph.client.admin.keyring
   delegate_to: "{{ (groups['ceph_monitors'] | default([]) | first) | default(inventory_hostname) }}"
   run_once: true
-  register: ceph_admin_keyring_stat
+  register: ceph_k8s_integration_admin_keyring_stat
 
 - name: Fail if Ceph admin keyring is missing on monitor
   ansible.builtin.fail:
     msg: "Ceph admin keyring not found at /etc/ceph/ceph.client.admin.keyring on Ceph monitor. Ensure Ceph is initialized."
-  when: false and ceph_admin_keyring_stat.stat.exists
+  when: false and ceph_k8s_integration_admin_keyring_stat.stat.exists
   run_once: true
 
 - name: Get Ceph admin keyring (from monitor)
@@ -39,40 +44,40 @@
     src: /etc/ceph/ceph.client.admin.keyring
   delegate_to: "{{ (groups['ceph_monitors'] | default([]) | first) | default(inventory_hostname) }}"
   run_once: true
-  register: ceph_admin_keyring
+  register: ceph_k8s_integration_admin_keyring
 
 - name: Extract Ceph admin key (store on monitor)
   ansible.builtin.set_fact:
-    ceph_admin_key: "{{ (ceph_admin_keyring.content | b64decode) | regex_search('key\\s*=\\s*(\\S+)', '\\1') }}"
+    ceph_k8s_integration_admin_key: "{{ (ceph_k8s_integration_admin_keyring.content | b64decode) | regex_search('key\\s*=\\s*(\\S+)', '\\1') }}"
   delegate_to: "{{ (groups['ceph_monitors'] | default([]) | first) | default(inventory_hostname) }}"
   run_once: true
 
 - name: Propagate Ceph admin key to k8s masters
   ansible.builtin.set_fact:
-    ceph_admin_key: "{{ hostvars[(groups['ceph_monitors'] | first)].ceph_admin_key }}"
+    ceph_k8s_integration_admin_key: "{{ hostvars[(groups['ceph_monitors'] | first)].ceph_k8s_integration_admin_key }}"
 
 - name: Create Kubernetes secret for Ceph
   ansible.builtin.shell: |
     set -o pipefail
     microk8s kubectl create secret generic ceph-admin-secret \
-      --from-literal=key="{{ ceph_admin_key }}" \
+      --from-literal=key="{{ ceph_k8s_integration_admin_key }}" \
       --namespace=ceph-storage \
       --dry-run=client -o yaml |
     microk8s kubectl apply -f -
   environment:
     KUBECONFIG: /var/snap/microk8s/current/credentials/client.config
-  register: create_ceph_secret
-  failed_when: create_ceph_secret.rc != 0 and 'AlreadyExists' not in (create_ceph_secret.stderr | default(''))
+  register: ceph_k8s_integration_create_ceph_secret
+  failed_when: ceph_k8s_integration_create_ceph_secret.rc != 0 and 'AlreadyExists' not in (ceph_k8s_integration_create_ceph_secret.stderr | default(''))
   changed_when: |
-    create_ceph_secret.rc == 0 and
-    ("created" in (create_ceph_secret.stdout | default('')) or
-    "configured" in (create_ceph_secret.stdout | default('')))
+    ceph_k8s_integration_create_ceph_secret.rc == 0 and
+    ("created" in (ceph_k8s_integration_create_ceph_secret.stdout | default('')) or
+    "configured" in (ceph_k8s_integration_create_ceph_secret.stdout | default('')))
 
 - name: Get Ceph cluster FSID (from monitor)
   ansible.builtin.shell: |
     set -o pipefail
     grep fsid /etc/ceph/ceph.conf | awk '{print $3}'
-  register: ceph_fsid_content
+  register: ceph_k8s_integration_fsid_content
   changed_when: false
   delegate_to: "{{ (groups['ceph_monitors'] | default([]) | first) | default(inventory_hostname) }}"
   run_once: true
@@ -81,15 +86,15 @@
   ansible.builtin.shell: |
     set -o pipefail
     grep "mon host" /etc/ceph/ceph.conf | awk '{for(i=3;i<=NF;i++) print $i}' | tr ',' '\n'
-  register: ceph_monitors_list
+  register: ceph_k8s_integration_monitors_list
   changed_when: false
   delegate_to: "{{ (groups['ceph_monitors'] | default([]) | first) | default(inventory_hostname) }}"
   run_once: true
 
 - name: Propagate FSID and monitors to k8s masters
   ansible.builtin.set_fact:
-    ceph_fsid: "{{ hostvars[(groups['ceph_monitors'] | first)].ceph_fsid_content.stdout }}"
-    ceph_monitors: "{{ hostvars[(groups['ceph_monitors'] | first)].ceph_monitors_list.stdout_lines }}"
+    ceph_k8s_integration_fsid: "{{ hostvars[(groups['ceph_monitors'] | first)].ceph_k8s_integration_fsid_content.stdout }}"
+    ceph_k8s_integration_monitors: "{{ hostvars[(groups['ceph_monitors'] | first)].ceph_k8s_integration_monitors_list.stdout_lines }}"
 
 - name: Create temporary directory for manifests
   ansible.builtin.file:
@@ -133,14 +138,14 @@
 - name: Verify storage classes
   ansible.builtin.shell: |
     microk8s kubectl get storageclasses
-  register: storage_classes
+  register: ceph_k8s_integration_storage_classes
   changed_when: false
   environment:
     KUBECONFIG: /var/snap/microk8s/current/credentials/client.config
 
 - name: Display available storage classes
   ansible.builtin.debug:
-    msg: "{{ storage_classes.stdout }}"
+    msg: "{{ ceph_k8s_integration_storage_classes.stdout }}"
 
 - name: Create sample PVC manifest
   ansible.builtin.copy:

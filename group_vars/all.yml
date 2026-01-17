@@ -3,8 +3,8 @@
 # These variables can be overridden by group_vars or host_vars
 
 # Common settings
-timezone: UTC
-update_packages: true
+common_timezone: UTC
+common_update_packages: true
 
 # Kubernetes settings
 k8s_version: "1.28"
