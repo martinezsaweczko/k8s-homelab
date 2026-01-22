@@ -15,7 +15,7 @@ k8s_microk8s_channel: "stable"
 # Ceph settings
 ceph_version: "quincy"
 ceph_release: "quincy"
-ceph_public_network: "0.0.0.0/0"
+ceph_public_network: "192.168.56.0/24"
 ceph_cluster_network: "0.0.0.0/0"
 
 # Storage pools

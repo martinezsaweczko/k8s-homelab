@@ -7,14 +7,21 @@
 - name: Configure all hosts
   hosts: all
   serial: 1
+  tags:
+    - common
   roles:
     - common
 
 - name: Setup Kubernetes cluster
   import_playbook: kubernetes.yml
+  tags:
+    - kubernetes
 
 - name: Setup Ceph cluster
   import_playbook: ceph.yml
-
-- name: Setup Ceph CSI RBD for Kubernetes integration
-  import_playbook: k8s-ceph-csi.yml
+  tags:
+    - ceph
+# - name: Setup Ceph CSI RBD for Kubernetes integration
+#   import_playbook: k8s-ceph-csi.yml
+#   tags:
+#     - k8s-ceph-csi

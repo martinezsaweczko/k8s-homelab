@@ -16,9 +16,36 @@
 all:
   children:
     ceph_monitors:
-      hosts: {}
+      hosts:
+        node1:
+          ansible_host: 192.168.56.101
+          ansible_user: david
+          node_hostname: homelab1
+        node2:
+          ansible_host: 192.168.56.102
+          ansible_user: david
+          node_hostname: homelab2
+        node3:
+          ansible_host: 192.168.56.103
+          ansible_user: david
+          node_hostname: homelab3
     ceph_osds:
-      hosts: {}
+      hosts:
+        node1:
+          ansible_host: 192.168.56.101
+          ansible_user: david
+          node_hostname: homelab1
+        node2:
+          ansible_host: 192.168.56.102
+          ansible_user: david
+          node_hostname: homelab2
+        node3:
+          ansible_host: 192.168.56.103
+          ansible_user: david
+          node_hostname: homelab3
+      vars:
+        ceph_osd_devices:
+          - /dev/sdb
     k8s_masters:
       hosts:
         node1:
@@ -33,8 +60,6 @@ all:
           ansible_host: 192.168.56.103
           ansible_user: david
           node_hostname: homelab3
-    k8s_workers:
-      hosts: {}
   vars:
     ansible_python_interpreter: /usr/bin/python3
     ansible_become: true

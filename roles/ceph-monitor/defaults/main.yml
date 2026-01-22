@@ -1,5 +1,10 @@
 ---
 # Ceph Monitor defaults
 ceph_version: "quincy"
-ceph_public_network: "0.0.0.0/0"
+ceph_public_network: "192.168.56.0/24"
 ceph_cluster_network: "0.0.0.0/0"
+
+# Dashboard configuration
+ceph_dashboard_ssl: false # Set to true to enable HTTPS
+ceph_dashboard_port: 8080 # Port for dashboard (8080 for HTTP, 8443 for HTTPS)
+ceph_dashboard_password: "admin" # Change this to a secure password

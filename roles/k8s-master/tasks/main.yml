@@ -240,11 +240,38 @@
       - "Join command: {{ k8s_join_command | default('undefined') }}"
       - "Join command bcp: {{ microk8s_join_cmd | default('undefined') }}"
 
+- name: Get actual hostname of the node
+  ansible.builtin.command: hostname
+  register: node_hostname
+  changed_when: false
+  when:
+    - inventory_hostname != groups['k8s_masters'][0]
+
+- name: Check if node is already part of the cluster
+  ansible.builtin.shell: |
+    microk8s kubectl get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo ""
+  register: cluster_nodes
+  delegate_to: "{{ groups['k8s_masters'][0] }}"
+  changed_when: false
+  when:
+    - inventory_hostname != groups['k8s_masters'][0]
+
+- name: Debug cluster nodes and hostname
+  ansible.builtin.debug:
+    msg:
+      - "cluster_nodes.stdout='{{ cluster_nodes.stdout | default('SKIPPED') }}'"
+      - "node_hostname.stdout='{{ node_hostname.stdout | default('SKIPPED') }}'"
+      - "Check result: node already in cluster = {{ node_hostname.stdout in cluster_nodes.stdout | default('SKIPPED') }}"
+  delegate_to: "{{ groups['k8s_masters'][0] }}"
+  when:
+    - inventory_hostname != groups['k8s_masters'][0]
+
 - name: Join cluster as control-plane
   ansible.builtin.shell: |
     {{ microk8s_join_cmd }}
   when:
     - inventory_hostname != groups['k8s_masters'][0]
+    - node_hostname.stdout not in cluster_nodes.stdout
   register: join_cp_result
   until: join_cp_result.rc == 0
   retries: 5
@@ -268,7 +295,7 @@
   delegate_to: "{{ groups['k8s_masters'][0] }}"
   ansible.builtin.shell: |
     set -o pipefail
-    microk8s kubectl get nodes --no-headers | grep -i "^{{ node_hostname }}\b" && echo "Node joined successfully"
+    microk8s kubectl get nodes --no-headers | grep -i "^{{ node_hostname.stdout }}\b" && echo "Node joined successfully"
   register: join_verify_cp
   until: join_verify_cp.rc == 0
   retries: 12

@@ -1,9 +1,10 @@
 [global]
 fsid = {{ ceph_cluster_fsid }}
-mon_initial_members = {% for host in groups['ceph_monitors'] %}{{ hostvars[host].inventory_hostname }}{{ "," if not loop.last }}{% endfor %}
+mon_initial_members = {% for host in groups['ceph_monitors'] %}{{ hostvars[host].ansible_facts['hostname'] | default(hostvars[host].inventory_hostname) }}{% if not loop.last %},{% endif %}{% endfor %}
 
-mon_host = {{ mon_host }}
-public_network = {{ ceph_public_network | default('0.0.0.0/0') }}
+mon_host = {% for host in groups['ceph_monitors'] %}{{ hostvars[host].ansible_host }}:6789{% if not loop.last %},{% endif %}{% endfor %}
+
+public_network = {{ ceph_public_network | default('192.168.56.0/24') }}
 auth_cluster_required = cephx
 auth_service_required = cephx
 auth_client_required = cephx
