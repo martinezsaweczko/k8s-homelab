@@ -1,0 +1,976 @@
+---
+# Ceph Monitor setup tasks - Simplified for Fedora compatibility
+
+- name: Set node_hostname from inventory
+  ansible.builtin.set_fact:
+    node_hostname: >-
+      {{ (
+          hostvars[inventory_hostname].node_hostname.stdout
+          if (hostvars[inventory_hostname].node_hostname is mapping and
+              hostvars[inventory_hostname].node_hostname.stdout is defined and
+              hostvars[inventory_hostname].node_hostname.stdout | length > 0)
+          else (
+            hostvars[inventory_hostname].node_hostname
+            if hostvars[inventory_hostname].node_hostname is string
+            else inventory_hostname
+          )
+      ) }}
+
+- name: Clean DNF cache and refresh metadata
+  ansible.builtin.shell: |
+    dnf clean all
+    dnf makecache -y
+  changed_when: false
+  become: true
+
+- name: Install Ceph prerequisites
+  ansible.builtin.dnf:
+    name:
+      - ceph
+      - ceph-mon
+      - ceph-mgr
+      - ceph-osd
+      - python3-ceph-common
+      - python3-rbd
+      - ceph-common
+    state: present
+    update_cache: yes
+
+- name: Create Ceph base directory with proper permissions
+  ansible.builtin.file:
+    path: /var/lib/ceph
+    state: directory
+    mode: "0755"
+    owner: ceph
+    group: ceph
+    recurse: true
+
+- name: Create Ceph subdirectories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+    owner: ceph
+    group: ceph
+  loop:
+    - /etc/ceph
+    - /var/lib/ceph/mon
+    - /var/lib/ceph/osd
+    - /var/lib/ceph/mds
+    - /var/log/ceph
+
+- name: Check if Ceph is already configured
+  ansible.builtin.stat:
+    path: /etc/ceph/ceph.conf
+  register: ceph_conf_stat
+
+# IDEMPOTENCY SAFEGUARD:
+# Only initialize the Ceph monitor if:
+# 1. Monitor filesystem does not exist (/var/lib/ceph/mon/ceph-<hostname>)
+# 2. This is the first (primary) monitor node
+# 3. The cluster is not already healthy (prevents re-initialization on retry runs)
+# This prevents accidentally wiping an existing cluster when the playbook is re-run.
+
+- name: Check if Ceph monitor is already initialized
+  ansible.builtin.stat:
+    path: "/var/lib/ceph/mon/ceph-{{ ansible_facts['hostname'] }}"
+  register: ceph_mon_fs_stat
+
+- name: Check if Ceph cluster is already healthy
+  ansible.builtin.shell: |
+    timeout 5 ceph status 2>/dev/null | grep -q "mon: " && echo "healthy" || echo "not-ready"
+  register: ceph_cluster_check
+  changed_when: false
+  ignore_errors: true
+
+- name: Set monitor initialization flag
+  ansible.builtin.set_fact:
+    should_init_monitor:
+      "{{ ((not ceph_mon_fs_stat.stat.exists or force_bootstrap | default(false) | bool)
+      and inventory_hostname == groups['ceph_monitors'][0]
+      and (ceph_cluster_check.stdout != 'healthy' or force_bootstrap | default(false) | bool)) | bool }}"
+
+- name: Debug - Show monitor filesystem check result
+  ansible.builtin.debug:
+    msg: |
+      Monitor FS check:
+      - Hostname: {{ inventory_hostname }}
+      - First monitor: {{ groups['ceph_monitors'][0] }}
+      - Is first monitor: {{ inventory_hostname == groups['ceph_monitors'][0] }}
+      - FS exists: {{ ceph_mon_fs_stat.stat.exists }}
+      - Cluster healthy: {{ ceph_cluster_check.stdout | default('unknown') }}
+      - Should initialize: {{ should_init_monitor }}
+
+- name: Generate Ceph FSID
+  ansible.builtin.shell: |
+    uuidgen
+  register: ceph_fsid
+  changed_when: false
+  when: should_init_monitor
+
+- name: Debug - FSID generation
+  ansible.builtin.debug:
+    msg: |
+      FSID Generation:
+      - Changed: {{ ceph_fsid.changed | default('N/A') }}
+      - RC: {{ ceph_fsid.rc | default('N/A') }}
+      - FSID: {{ ceph_fsid.stdout | default('EMPTY') }}
+  when: should_init_monitor
+
+- name: Set Ceph FSID fact
+  ansible.builtin.set_fact:
+    ceph_cluster_fsid: "{{ ceph_fsid.stdout | trim }}"
+  when: should_init_monitor
+
+- name: Create Ceph configuration file
+  ansible.builtin.template:
+    src: ceph.conf.j2
+    dest: /etc/ceph/ceph.conf
+    mode: "0644"
+  vars:
+    ceph_cluster_fsid: "{{ hostvars[groups['ceph_monitors'][0]]['ceph_cluster_fsid'] | default('') }}"
+  when: should_init_monitor
+  register: ceph_conf_result
+
+- name: Display ceph.conf content (for debugging)
+  ansible.builtin.command: cat /etc/ceph/ceph.conf
+  register: ceph_conf_content
+  changed_when: false
+  when: ceph_conf_stat.stat.exists and inventory_hostname == groups['ceph_monitors'][0]
+  failed_when: false
+
+- name: Show ceph.conf
+  ansible.builtin.debug:
+    msg: "{{ ceph_conf_content.stdout }}"
+  when: ceph_conf_stat.stat.exists and inventory_hostname == groups['ceph_monitors'][0]
+
+- name: Create Ceph keyring directory
+  ansible.builtin.file:
+    path: /etc/ceph/keyring.d
+    state: directory
+    mode: "0755"
+    owner: ceph
+    group: ceph
+
+- name: Generate Ceph monitor key
+  ansible.builtin.shell: |
+    ceph-authtool --create-keyring /tmp/ceph.mon.keyring \
+      --gen-key -n mon. \
+      --cap mon 'allow *'
+  args:
+    creates: /tmp/ceph.mon.keyring
+  when: should_init_monitor
+  register: mon_key_gen
+
+- name: Debug - Monitor key generation
+  ansible.builtin.shell: |
+    ls -la /tmp/ceph.mon.keyring 2>&1 || echo "File does not exist"
+  register: mon_key_check
+  changed_when: false
+  when: should_init_monitor
+- name: Show monitor key generation result
+  ansible.builtin.debug:
+    msg: "{{ mon_key_check.stdout }}"
+  when: should_init_monitor
+
+- name: Generate Ceph admin key in temporary location
+  ansible.builtin.shell: |
+    ceph-authtool --create-keyring /tmp/ceph.client.admin.keyring \
+      --gen-key -n client.admin \
+      --cap mon 'allow *' \
+      --cap osd 'allow *' \
+      --cap mds 'allow *' \
+      --cap mgr 'allow *'
+  args:
+    creates: /tmp/ceph.client.admin.keyring
+  when: should_init_monitor
+  register: admin_key_gen
+
+- name: Debug - Admin key generation
+  ansible.builtin.shell: |
+    ls -la /tmp/ceph.client.admin.keyring 2>&1 || echo "File does not exist"
+  register: admin_key_check
+  changed_when: false
+  when: should_init_monitor
+
+- name: Show admin key generation result
+  ansible.builtin.debug:
+    msg: "{{ admin_key_check.stdout }}"
+  when: should_init_monitor
+
+- name: Import admin key into monitor keyring (BEFORE mkfs)
+  ansible.builtin.shell: |
+    ceph-authtool /tmp/ceph.mon.keyring --import-keyring /tmp/ceph.client.admin.keyring
+  when: should_init_monitor
+  changed_when: true
+  failed_when: false
+
+- name: Check if admin keyring exists in temp location
+  ansible.builtin.stat:
+    path: /tmp/ceph.client.admin.keyring
+  register: admin_keyring_stat
+  when: ceph_conf_stat.stat.exists and inventory_hostname == groups['ceph_monitors'][0]
+
+- name: Copy admin keyring to final location
+  ansible.builtin.copy:
+    src: /tmp/ceph.client.admin.keyring
+    dest: /etc/ceph/ceph.client.admin.keyring
+    remote_src: true
+    mode: "0600"
+    owner: ceph
+    group: ceph
+  when:
+    - not ceph_mon_fs_stat.stat.exists
+    - inventory_hostname == groups['ceph_monitors'][0]
+    - admin_keyring_stat.stat.exists | default(false)
+
+# - name: Generate monmap
+# DRY-RUN / DEBUG: show which IPs will be used to build the monmap and
+# display the monmaptool command before creating /tmp/monmap. This helps
+# verify we won't use Vagrant/NAT IPs like 10.0.2.15.
+
+- name: Debug - show chosen monitor IPs (dry-run)
+  ansible.builtin.debug:
+    msg: "Monitor {{ item }} -> {{ hostvars[item].ansible_host }}"
+  loop: "{{ groups['ceph_monitors'] }}"
+  run_once: true
+  when: inventory_hostname == groups['ceph_monitors'][0]
+
+- name: Build monmap entries (dry-run)
+  ansible.builtin.set_fact:
+    monmap_entries: "{{ monmap_entries | default([]) + ['--add ' + item + ' ' + (hostvars[item].ansible_host) + ':6789'] }}"
+  loop: "{{ groups['ceph_monitors'] }}"
+  run_once: true
+  when: inventory_hostname == groups['ceph_monitors'][0]
+
+- name: Debug - show monmaptool command (dry-run)
+  ansible.builtin.debug:
+    msg: "{{ 'monmaptool --create ' + (monmap_entries | join(' ')) + ' /tmp/monmap' }}"
+  run_once: true
+  when: inventory_hostname == groups['ceph_monitors'][0]
+
+- name: Generate monmap
+  ansible.builtin.shell: |
+    monmaptool --create {% for host in groups['ceph_monitors'] %} \
+      --add {{ host }} {{ hostvars[host].ansible_host }}:6789{% endfor %} \
+      /tmp/monmap
+  args:
+    creates: /tmp/monmap
+  when: should_init_monitor
+
+  # Prefer the host's primary interface address when creating the monmap so
+  # Vagrant/NAT addresses (eg. 10.0.2.15) are not accidentally used.
+  # Fall back to `ansible_host` if the interface address is not available.
+
+- name: Clean up failed monitor setup (if it exists)
+  ansible.builtin.shell: |
+    if [ -d "/var/lib/ceph/mon/ceph-{{ node_hostname }}" ]; then
+      echo "Cleaning up failed monitor directory..."
+      rm -rf "/var/lib/ceph/mon/ceph-{{ node_hostname }}"
+    fi
+  changed_when: true
+  failed_when: false
+  when: should_init_monitor
+
+- name: Initialize Ceph monitor with detailed output
+  ansible.builtin.shell: |
+    echo "Starting monitor initialization..."
+    echo "Monmap location: /tmp/monmap"
+    echo "Keyring location: /tmp/ceph.mon.keyring"
+    echo "Target directory: /var/lib/ceph/mon/ceph-{{ node_hostname }}"
+    echo "Current user: $(whoami)"
+    echo "UID/GID: $(id)"
+
+    ls -la /tmp/monmap /tmp/ceph.mon.keyring 2>&1
+
+    echo "Creating monitor directory..."
+    mkdir -p "/var/lib/ceph/mon/ceph-{{ node_hostname }}"
+    ls -la /var/lib/ceph/mon/ 2>&1
+
+    echo "Running ceph-mon mkfs..."
+    ceph-mon --mkfs -i {{ node_hostname }} \
+      --monmap /tmp/monmap \
+      --keyring /tmp/ceph.mon.keyring 2>&1
+
+    echo "Monitor initialization completed"
+    ls -la "/var/lib/ceph/mon/ceph-{{ node_hostname }}/" 2>&1
+  args:
+    creates: "/var/lib/ceph/mon/ceph-{{ node_hostname }}/store.db"
+  when: should_init_monitor
+  register: mon_mkfs
+  failed_when: mon_mkfs.rc != 0
+
+- name: Display monitor initialization output
+  ansible.builtin.debug:
+    msg: "{{ mon_mkfs.stdout }}"
+  when: should_init_monitor
+- name: Fix permissions on monitor directory
+  ansible.builtin.file:
+    path: "/var/lib/ceph/mon/ceph-{{ node_hostname }}"
+    owner: ceph
+    group: ceph
+    recurse: true
+
+- name: Fix Ceph directory permissions before starting service
+  ansible.builtin.file:
+    path: "{{ item }}"
+    mode: "0755"
+    owner: ceph
+    group: ceph
+    recurse: true
+  loop:
+    - /var/lib/ceph
+    - /var/log/ceph
+  failed_when: false
+
+- name: Verify monitor filesystem exists
+  ansible.builtin.stat:
+    path: "/var/lib/ceph/mon/ceph-{{ node_hostname }}"
+  register: mon_fs
+
+- name: Wait for all secondary monitors to be initialized
+  ansible.builtin.pause:
+    seconds: 5
+  when: inventory_hostname == groups['ceph_monitors'][0] and groups['ceph_monitors'] | length > 1
+
+- name: Debug monitor filesystem status
+  ansible.builtin.debug:
+    msg: |
+      Monitor filesystem check:
+      - Path: /var/lib/ceph/mon/ceph-{{ node_hostname }}
+      - Exists: {{ mon_fs.stat.exists }}
+      - Is directory: {{ mon_fs.stat.isdir | default(false) }}
+  when: inventory_hostname == groups['ceph_monitors'][0]
+
+- name: Fail if monitor initialization failed
+  ansible.builtin.fail:
+    msg: "Monitor filesystem was not created. Check the initialization task output above."
+  when: not mon_fs.stat.exists and inventory_hostname == groups['ceph_monitors'][0]
+
+- name: Display monitor filesystem status
+  ansible.builtin.debug:
+    msg: |
+      Monitor filesystem for {{ node_hostname }}:
+      - Path: /var/lib/ceph/mon/ceph-{{ node_hostname }}
+      - Exists: {{ mon_fs.stat.exists }}
+      - Owner: {{ mon_fs.stat.pw_name }}:{{ mon_fs.stat.gr_name }}
+      - Mode: {{ mon_fs.stat.mode }}
+
+- name: Reset ceph-mon service failed state
+  ansible.builtin.systemd:
+    name: "ceph-mon@{{ node_hostname }}"
+    state: restarted
+    daemon_reload: true
+  failed_when: false
+  changed_when: false
+  when: inventory_hostname == groups['ceph_monitors'][0]
+
+- name: Enable and start ceph-mon service (primary only)
+  ansible.builtin.systemd:
+    name: "ceph-mon@{{ node_hostname }}"
+    state: started
+    enabled: true
+    daemon_reload: true
+  register: mon_service
+  ignore_errors: true
+  when: inventory_hostname == groups['ceph_monitors'][0]
+
+- name: Slurp generated Ceph files on primary monitor (for distribution)
+  ansible.builtin.slurp:
+    src: /etc/ceph/ceph.conf
+  register: ceph_conf_slurp
+  when: inventory_hostname == groups['ceph_monitors'][0]
+  run_once: true
+  become: true
+
+- name: Slurp monitor keyring on primary (if present)
+  ansible.builtin.slurp:
+    src: /tmp/ceph.mon.keyring
+  register: ceph_mon_keyring_slurp
+  when: inventory_hostname == groups['ceph_monitors'][0]
+  run_once: true
+  ignore_errors: true
+  become: true
+
+- name: Slurp monmap on primary (if present)
+  ansible.builtin.slurp:
+    src: /tmp/monmap
+  register: monmap_slurp
+  when: inventory_hostname == groups['ceph_monitors'][0]
+  run_once: true
+  ignore_errors: true
+  become: true
+
+- name: Slurp admin keyring on primary (if present)
+  ansible.builtin.slurp:
+    src: /etc/ceph/ceph.client.admin.keyring
+  register: admin_keyring_slurp
+  when: inventory_hostname == groups['ceph_monitors'][0]
+  run_once: true
+  ignore_errors: true
+  become: true
+
+- name: Build destination host lists for distribution
+  ansible.builtin.set_fact:
+    dest_hosts_all: "{{ (groups['ceph_monitors'] + groups['ceph_osds']) | unique }}"
+    dest_hosts_monitors: "{{ groups['ceph_monitors'] }}"
+  when: inventory_hostname == groups['ceph_monitors'][0]
+  run_once: true
+
+- name: Distribute ceph.conf to monitors and OSDs
+  ansible.builtin.copy:
+    content: "{{ ceph_conf_slurp.content | b64decode }}"
+    dest: /etc/ceph/ceph.conf
+    mode: "0644"
+    owner: ceph
+    group: ceph
+  delegate_to: "{{ item }}"
+  run_once: true
+  become: true
+  loop: "{{ dest_hosts_all }}"
+  when:
+    - inventory_hostname == groups['ceph_monitors'][0]
+    - ceph_conf_slurp is defined and ceph_conf_slurp.content is defined
+    - item != groups['ceph_monitors'][0]
+
+- name: Distribute monitor keyring to other monitors
+  ansible.builtin.copy:
+    content: "{{ ceph_mon_keyring_slurp.content | b64decode }}"
+    dest: /tmp/ceph.mon.keyring
+    mode: "0600"
+    owner: ceph
+    group: ceph
+  delegate_to: "{{ item }}"
+  run_once: true
+  become: true
+  loop: "{{ dest_hosts_monitors }}"
+  when:
+    - inventory_hostname == groups['ceph_monitors'][0]
+    - ceph_mon_keyring_slurp is defined and ceph_mon_keyring_slurp.content is defined
+    - item != groups['ceph_monitors'][0]
+
+- name: Distribute monmap to other monitors
+  ansible.builtin.copy:
+    content: "{{ monmap_slurp.content | b64decode }}"
+    dest: /tmp/monmap
+    mode: "0600"
+    owner: ceph
+    group: ceph
+  delegate_to: "{{ item }}"
+  run_once: true
+  become: true
+  loop: "{{ dest_hosts_monitors }}"
+  when:
+    - inventory_hostname == groups['ceph_monitors'][0]
+    - monmap_slurp is defined and monmap_slurp.content is defined
+    - item != groups['ceph_monitors'][0]
+
+- name: Distribute admin keyring to other monitors
+  ansible.builtin.copy:
+    content: "{{ admin_keyring_slurp.content | b64decode }}"
+    dest: /etc/ceph/ceph.client.admin.keyring
+    mode: "0600"
+    owner: ceph
+    group: ceph
+  delegate_to: "{{ item }}"
+  run_once: true
+  become: true
+  loop: "{{ dest_hosts_monitors }}"
+  when:
+    - inventory_hostname == groups['ceph_monitors'][0]
+    - admin_keyring_slurp is defined and admin_keyring_slurp.content is defined
+    - item != groups['ceph_monitors'][0]
+
+- name: Capture journalctl output if service failed
+  ansible.builtin.shell: |
+    journalctl -xeu ceph-mon@{{ node_hostname }} -n 50 --no-pager
+  register: mon_journal
+  changed_when: false
+  when: mon_service.failed | default(false)
+
+- name: Display journal error details
+  ansible.builtin.debug:
+    msg: "{{ mon_journal.stdout }}"
+  when: mon_service.failed | default(false)
+
+- name: Fail with detailed error
+  ansible.builtin.fail:
+    msg: |
+      Failed to start ceph-mon service. See journal output above.
+      Check:
+      1. Monitor data directory: /var/lib/ceph/mon/ceph-{{ inventory_hostname }}
+      2. Configuration: /etc/ceph/ceph.conf
+      3. Keyring: /tmp/ceph.mon.keyring
+  when: mon_service.failed | default(false)
+
+# - name: Wait for Ceph monitor to be ready
+#   ansible.builtin.shell: |
+#     for i in {1..60}; do
+#       if timeout 5 ceph -s --keyring /etc/ceph/ceph.client.admin.keyring --name client.admin 2>/dev/null | grep -q "mon:"; then
+#         echo "Ceph monitor is ready"
+#         exit 0
+#       fi
+#       echo "Attempt $i/60: Waiting for monitor to respond..."
+#       sleep 5
+#     done
+#     echo "Monitor not responding after 5 minutes, but continuing..."
+#   register: ceph_ready
+#   ignore_errors: true
+#   changed_when: false
+#   retries: 1
+#   delay: 10
+#   when: inventory_hostname == groups['ceph_monitors'][0]
+
+# - name: Create RBD pool for Kubernetes
+#   ansible.builtin.shell: |
+#     ceph osd pool create kubernetes 128 128 --autoscale-mode on 2>/dev/null || true
+#   failed_when: false
+#   changed_when: true
+#   when: inventory_hostname == groups['ceph_monitors'][0]
+
+# - name: Enable RBD application on pool
+#   ansible.builtin.shell: |
+#     ceph osd pool application enable kubernetes rbd 2>/dev/null || true
+#   failed_when: false
+#   changed_when: true
+#   when: inventory_hostname == groups['ceph_monitors'][0]
+
+# - name: Create bootstrap-osd keyring directory
+#   ansible.builtin.file:
+#     path: /var/lib/ceph/bootstrap-osd
+#     state: directory
+#     mode: "0755"
+#     owner: ceph
+#     group: ceph
+#   when: inventory_hostname == groups['ceph_monitors'][0]
+
+# - name: Check if bootstrap-osd keyring is already valid
+#   ansible.builtin.shell: |
+#     [ -s /var/lib/ceph/bootstrap-osd/ceph.keyring ] && echo "valid" || echo "invalid"
+#   register: bootstrap_keyring_check
+#   changed_when: false
+#   ignore_errors: true
+#   when: inventory_hostname == groups['ceph_monitors'][0]
+
+# - name: Delete old bootstrap-osd key if it exists with wrong capabilities
+#   ansible.builtin.shell: |
+#     ceph auth del client.bootstrap-osd 2>/dev/null || true
+#   failed_when: false
+#   changed_when: true
+#   when:
+#     - inventory_hostname == groups['ceph_monitors'][0]
+#     - bootstrap_keyring_check.stdout | default('invalid') != 'valid'
+
+# - name: Generate bootstrap-osd keyring
+#   ansible.builtin.shell: |
+#     ceph auth get-or-create client.bootstrap-osd mon 'allow profile bootstrap-osd' osd 'allow *' > /var/lib/ceph/bootstrap-osd/ceph.keyring
+#   failed_when: false
+#   changed_when: true
+#   when:
+#     - inventory_hostname == groups['ceph_monitors'][0]
+#     - bootstrap_keyring_check.stdout | default('invalid') != 'valid'
+
+# - name: Fix bootstrap-osd keyring permissions
+#   ansible.builtin.file:
+#     path: /var/lib/ceph/bootstrap-osd/ceph.keyring
+#     mode: "0644"
+#     owner: ceph
+#     group: ceph
+#   failed_when: false
+#   when: inventory_hostname == groups['ceph_monitors'][0]
+# - name: Display Ceph cluster status
+#   ansible.builtin.shell: |
+#     ceph -s 2>/dev/null || echo "Ceph cluster initializing..."
+#   register: ceph_status
+#   changed_when: false
+#   ignore_errors: true
+
+# - name: Show Ceph status
+#   ansible.builtin.debug:
+#     msg: "{{ ceph_status.stdout }}"
+# - name: Wait for primary monitor to be fully ready
+#   ansible.builtin.pause:
+#     seconds: 40
+#   when: inventory_hostname == groups['ceph_monitors'][0] and groups['ceph_monitors'] | length > 1
+- name: Bootstrap additional monitors (if any)
+  when: groups['ceph_monitors'] | length > 1 and inventory_hostname != groups['ceph_monitors'][0]
+  block:
+    - name: Debug - Secondary monitor bootstrap starting
+      ansible.builtin.debug:
+        msg: |
+          Starting bootstrap for {{ inventory_hostname }}
+          Primary monitor: {{ groups['ceph_monitors'][0] }}
+          Waiting for files from primary...
+
+    - name: Wait for primary monitor to generate monmap
+      ansible.builtin.wait_for:
+        path: /tmp/monmap
+        delay: 2
+        timeout: 300
+      delegate_to: "{{ groups['ceph_monitors'][0] }}"
+
+    - name: Wait for primary monitor to write ceph.conf
+      ansible.builtin.wait_for:
+        path: /etc/ceph/ceph.conf
+        delay: 2
+        timeout: 300
+      delegate_to: "{{ groups['ceph_monitors'][0] }}"
+      become: true
+
+    - name: Wait for primary monitor to have monitor keyring
+      ansible.builtin.wait_for:
+        path: /tmp/ceph.mon.keyring
+        delay: 2
+        timeout: 300
+      delegate_to: "{{ groups['ceph_monitors'][0] }}"
+      become: true
+
+    - name: Wait for primary monitor to have admin keyring
+      ansible.builtin.wait_for:
+        path: /etc/ceph/ceph.client.admin.keyring
+        delay: 2
+        timeout: 300
+      delegate_to: "{{ groups['ceph_monitors'][0] }}"
+      become: true
+
+    - name: Clean up secondary monitor if force_bootstrap is enabled
+      ansible.builtin.shell: |
+        rm -rf "/var/lib/ceph/mon/ceph-{{ node_hostname }}"
+      changed_when: true
+      when: force_bootstrap | default(false) | bool
+
+    - name: Get Ceph configuration from primary monitor
+      ansible.builtin.slurp:
+        src: /etc/ceph/ceph.conf
+      register: ceph_conf_content
+      delegate_to: "{{ groups['ceph_monitors'][0] }}"
+      retries: 3
+      delay: 2
+      become: true
+
+    - name: Debug - Retrieved ceph.conf content
+      ansible.builtin.debug:
+        msg: "Retrieved ceph.conf content of size {{ ceph_conf_content.content | length }} bytes"
+      when: ceph_conf_content is defined and ceph_conf_content.content is defined
+
+    - name: Write Ceph configuration on secondary monitor
+      ansible.builtin.copy:
+        content: "{{ ceph_conf_content.content | b64decode }}"
+        dest: /etc/ceph/ceph.conf
+        mode: "0644"
+      when: ceph_conf_content is defined and ceph_conf_content.content is defined
+
+    - name: Verify ceph.conf was written
+      ansible.builtin.stat:
+        path: /etc/ceph/ceph.conf
+      register: ceph_conf_check
+      failed_when: not ceph_conf_check.stat.exists
+
+    - name: Get monitor keyring from primary
+      ansible.builtin.slurp:
+        src: /tmp/ceph.mon.keyring
+      register: ceph_mon_keyring_content
+      delegate_to: "{{ groups['ceph_monitors'][0] }}"
+      retries: 3
+      delay: 2
+      become: true
+
+    - name: Write monitor keyring on secondary monitor
+      ansible.builtin.copy:
+        content: "{{ ceph_mon_keyring_content.content | b64decode }}"
+        dest: /tmp/ceph.mon.keyring
+        mode: "0600"
+      when: ceph_mon_keyring_content is defined and ceph_mon_keyring_content.content is defined
+
+    - name: Get monmap from primary monitor
+      ansible.builtin.slurp:
+        src: /tmp/monmap
+      register: monmap_content
+      delegate_to: "{{ groups['ceph_monitors'][0] }}"
+      retries: 3
+      delay: 2
+      become: true
+
+    - name: Write monmap on secondary monitor
+      ansible.builtin.copy:
+        content: "{{ monmap_content.content | b64decode }}"
+        dest: /tmp/monmap
+        mode: "0600"
+      when: monmap_content is defined and monmap_content.content is defined
+
+    - name: Get admin keyring from primary monitor
+      ansible.builtin.slurp:
+        src: /etc/ceph/ceph.client.admin.keyring
+      register: admin_keyring_content
+      delegate_to: "{{ groups['ceph_monitors'][0] }}"
+      retries: 3
+      delay: 2
+      become: true
+
+    - name: Write admin keyring on secondary monitor
+      ansible.builtin.copy:
+        content: "{{ admin_keyring_content.content | b64decode }}"
+        dest: /etc/ceph/ceph.client.admin.keyring
+        mode: "0600"
+        owner: ceph
+        group: ceph
+      when: admin_keyring_content is defined and admin_keyring_content.content is defined
+
+    - name: Initialize secondary Ceph monitor
+      ansible.builtin.shell: |
+        mkdir -p "/var/lib/ceph/mon/ceph-{{ node_hostname }}"
+        ceph-mon --mkfs -i {{ node_hostname }} \
+          --monmap /tmp/monmap \
+          --keyring /tmp/ceph.mon.keyring
+      changed_when: true
+
+    - name: Fix permissions on secondary monitor directory
+      ansible.builtin.file:
+        path: "/var/lib/ceph/mon/ceph-{{ node_hostname }}"
+        owner: ceph
+        group: ceph
+        recurse: true
+
+    - name: Reset secondary ceph-mon service failed state
+      ansible.builtin.systemd:
+        name: "ceph-mon@{{ node_hostname }}"
+        state: restarted
+        daemon_reload: true
+      failed_when: false
+      changed_when: false
+
+    - name: Enable and start ceph-mon service (secondary)
+      ansible.builtin.systemd:
+        name: "ceph-mon@{{ node_hostname }}"
+        state: started
+        enabled: true
+        daemon_reload: true
+      register: mon_service
+      ignore_errors: true
+# # Ceph Dashboard Configuration
+# - name: Create manager data directory
+#   ansible.builtin.file:
+#     path: "/var/lib/ceph/mgr/ceph-{{ node_hostname }}"
+#     state: directory
+#     mode: "0755"
+#     owner: ceph
+#     group: ceph
+#   when: inventory_hostname == groups['ceph_monitors'][0]
+
+# - name: Generate Ceph manager keyring using ceph-authtool
+#   ansible.builtin.shell: |
+#     ceph-authtool --create-keyring /var/lib/ceph/mgr/ceph-{{ node_hostname }}/keyring \
+#       --gen-key -n mgr.{{ node_hostname }} \
+#       --cap mon 'allow profile mgr' \
+#       --cap osd 'allow *' \
+#       --cap mds 'allow *'
+#   args:
+#     creates: "/var/lib/ceph/mgr/ceph-{{ inventory_hostname }}/keyring"
+#   when: inventory_hostname == groups['ceph_monitors'][0]
+#   failed_when: false
+#   changed_when: true
+
+# - name: Fix manager keyring permissions
+#   ansible.builtin.file:
+#     path: "/var/lib/ceph/mgr/ceph-{{ inventory_hostname }}/keyring"
+#     mode: "0600"
+#     owner: ceph
+#     group: ceph
+#   when: inventory_hostname == groups['ceph_monitors'][0]
+#   failed_when: false
+
+# - name: Check if mgr keyring was created
+#   ansible.builtin.stat:
+#     path: "/var/lib/ceph/mgr/ceph-{{ inventory_hostname }}/keyring"
+#   register: mgr_keyring_stat
+#   when: inventory_hostname == groups['ceph_monitors'][0]
+
+# - name: Display mgr keyring status
+#   ansible.builtin.debug:
+#     msg: "MGR keyring exists: {{ mgr_keyring_stat.stat.exists }}"
+#   when: inventory_hostname == groups['ceph_monitors'][0]
+
+# - name: Check if mgr entity exists in monitor auth
+#   ansible.builtin.command: ceph auth get mgr.{{ inventory_hostname }}
+#   register: mgr_auth_check
+#   failed_when: false
+#   changed_when: false
+#   when: inventory_hostname == groups['ceph_monitors'][0]
+
+# - name: Create mgr entity on monitor if missing and write keyring
+#   ansible.builtin.shell: |
+#     ceph auth get-or-create mgr.{{ inventory_hostname }} \
+#       mon 'allow profile mgr' osd 'allow *' mds 'allow *' \
+#       -o /var/lib/ceph/mgr/ceph-{{ inventory_hostname }}/keyring
+#   register: mgr_auth
+#   become: true
+#   changed_when: "'added' in mgr_auth.stdout.lower() or 'created' in mgr_auth.stdout.lower() or mgr_auth.rc == 0"
+#   when:
+#     - inventory_hostname == groups['ceph_monitors'][0]
+#     - mgr_auth_check.rc != 0
+
+# - name: Retrieve mgr keyring from monitor if entity exists but local keyring missing
+#   ansible.builtin.shell: |
+#     ceph auth get mgr.{{ inventory_hostname }} -o /var/lib/ceph/mgr/ceph-{{ inventory_hostname }}/keyring
+#   register: mgr_key_get
+#   become: true
+#   changed_when: mgr_key_get.rc == 0
+#   failed_when: false
+#   when:
+#     - inventory_hostname == groups['ceph_monitors'][0]
+#     - mgr_auth_check.rc == 0
+#     - not mgr_keyring_stat.stat.exists
+
+# - name: Fix manager keyring permissions (ensure ownership)
+#   ansible.builtin.file:
+#     path: "/var/lib/ceph/mgr/ceph-{{ inventory_hostname }}/keyring"
+#     mode: "0600"
+#     owner: ceph
+#     group: ceph
+#   when: inventory_hostname == groups['ceph_monitors'][0]
+
+# - name: Re-check if mgr keyring was created
+#   ansible.builtin.stat:
+#     path: "/var/lib/ceph/mgr/ceph-{{ inventory_hostname }}/keyring"
+#   register: mgr_keyring_stat
+#   when: inventory_hostname == groups['ceph_monitors'][0]
+
+# - name: Fix manager keyring permissions (ensure ownership)
+#   ansible.builtin.file:
+#     path: "/var/lib/ceph/mgr/ceph-{{ inventory_hostname }}/keyring"
+#     mode: "0600"
+#     owner: ceph
+#     group: ceph
+#   when: inventory_hostname == groups['ceph_monitors'][0]
+
+# - name: Re-check if mgr keyring was created
+#   ansible.builtin.stat:
+#     path: "/var/lib/ceph/mgr/ceph-{{ inventory_hostname }}/keyring"
+#   register: mgr_keyring_stat
+#   when: inventory_hostname == groups['ceph_monitors'][0]
+
+# - name: Reset ceph-mgr service failed state
+#   ansible.builtin.systemd:
+#     name: "ceph-mgr@{{ inventory_hostname }}"
+#     state: restarted
+#     daemon_reload: true
+#   become: true
+#   failed_when: false
+#   changed_when: false
+#   when: inventory_hostname == groups['ceph_monitors'][0]
+
+# - name: Start Ceph Manager service
+#   ansible.builtin.systemd:
+#     name: "ceph-mgr@{{ inventory_hostname }}"
+#     state: restarted
+#     enabled: true
+#     daemon_reload: true
+#   when:
+#     - inventory_hostname == groups['ceph_monitors'][0]
+#     - mgr_keyring_stat.stat.exists
+#   register: mgr_service
+#   ignore_errors: true
+
+# - name: Wait for Ceph Manager to be ready
+#   ansible.builtin.pause:
+#     seconds: 10
+#   when: inventory_hostname == groups['ceph_monitors'][0]
+
+# - name: Wait for Ceph cluster to be fully initialized
+#   ansible.builtin.pause:
+#     seconds: 30
+#   when: inventory_hostname == groups['ceph_monitors'][0]
+
+# - name: Enable Ceph Dashboard module
+#   ansible.builtin.shell: |
+#     ceph mgr module enable dashboard
+#   failed_when: false
+#   changed_when: true
+#   when: inventory_hostname == groups['ceph_monitors'][0]
+
+# - name: Set Ceph Dashboard server port
+#   ansible.builtin.shell: |
+#     ceph config set mgr mgr/dashboard/server_port 7000
+#   failed_when: false
+#   changed_when: true
+#   when: inventory_hostname == groups['ceph_monitors'][0]
+
+# - name: Disable HTTPS for Dashboard (self-signed cert issues)
+#   ansible.builtin.shell: |
+#     ceph config set mgr mgr/dashboard/ssl false
+#   failed_when: false
+#   changed_when: true
+#   when: inventory_hostname == groups['ceph_monitors'][0]
+
+# - name: Generate random password for dashboard
+#   ansible.builtin.shell: |
+#     set -o pipefail
+#     head -c 16 /dev/urandom | base64 | tr -d '/+=' | cut -c1-16
+#   register: dashboard_password
+#   changed_when: false
+#   when: inventory_hostname == groups['ceph_monitors'][0]
+
+# - name: Delete existing admin user if present
+#   ansible.builtin.shell: |
+#     ceph dashboard ac-user-delete admin 2>/dev/null || true
+#   failed_when: false
+#   changed_when: true
+#   when: inventory_hostname == groups['ceph_monitors'][0]
+
+# - name: Wait for dashboard to be ready
+#   ansible.builtin.pause:
+#     seconds: 2
+#   when: inventory_hostname == groups['ceph_monitors'][0]
+
+# - name: Create new dashboard admin user
+#   ansible.builtin.shell: |
+#     set -o pipefail
+#     echo "{{ dashboard_password.stdout }}" | ceph dashboard ac-user-create admin administrator -i /dev/stdin
+#   failed_when: false
+#   changed_when: true
+#   when: inventory_hostname == groups['ceph_monitors'][0]
+
+# - name: Save dashboard password to file
+#   ansible.builtin.copy:
+#     content: "{{ dashboard_password.stdout }}"
+#     dest: /tmp/ceph-dashboard-admin.txt
+#     mode: "0600"
+#   when: inventory_hostname == groups['ceph_monitors'][0]
+
+# - name: Confirm dashboard setup
+#   ansible.builtin.debug:
+#     msg: "Dashboard admin user configured. Credentials saved to /tmp/ceph-dashboard-admin.txt"
+#   when: inventory_hostname == groups['ceph_monitors'][0]
+#   register: dashboard_user
+
+# - name: Display dashboard user creation output
+#   ansible.builtin.debug:
+#     msg: "{{ dashboard_user.stdout }}"
+#   when:
+#     - inventory_hostname == groups['ceph_monitors'][0]
+#     - dashboard_user.stdout is defined
+
+# - name: Get Dashboard admin password
+#   ansible.builtin.slurp:
+#     src: /tmp/ceph-dashboard-admin.txt
+#   register: dashboard_password
+#   ignore_errors: true
+#   when: inventory_hostname == groups['ceph_monitors'][0]
+
+# - name: Display Ceph Dashboard access information
+#   ansible.builtin.debug:
+#     msg: |
+#       =====================================================
+#       Ceph Dashboard is now configured and ready to use
+#       =====================================================
+
+#       Dashboard URL: http://{{ hostvars[groups['ceph_monitors'][0]]['ansible_default_ipv4']['address'] }}:7000
+
+#       Default Username: admin
+#       Default Password: Check /tmp/ceph-dashboard-admin.txt on {{ groups['ceph_monitors'][0] }}
+
+#       To retrieve the password:
+#       ssh {{ hostvars[groups['ceph_monitors'][0]]['ansible_user'] }}@{{ hostvars[groups['ceph_monitors'][0]]['ansible_host'] }}
+#       cat /tmp/ceph-dashboard-admin.txt
+#       =====================================================
+#   when: inventory_hostname == groups['ceph_monitors'][0]

@@ -4,11 +4,12 @@
   hosts: ceph_monitors
   roles:
     - ceph-monitor
-# - name: Setup Ceph OSDs
-#   hosts: ceph_osds
-#   roles:
-#     - ceph-osd
 
+- name: Setup Ceph OSDs
+  hosts: ceph_osds
+  tags: ceph-osd
+  roles:
+    - ceph-osd
 # - name: Integrate Ceph with Kubernetes
 #   hosts: k8s_masters
 #   roles:

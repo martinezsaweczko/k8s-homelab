@@ -196,6 +196,47 @@
   when: inventory_hostname == groups['ceph_monitors'][0]
   run_once: true
 
+- name: Create bootstrap-osd keyring directory (primary)
+  become: true
+  file:
+    path: /var/lib/ceph/bootstrap-osd
+    state: directory
+    mode: "0755"
+    owner: ceph
+    group: ceph
+  when: inventory_hostname == groups['ceph_monitors'][0]
+  run_once: true
+
+- name: Delete old bootstrap-osd key if it exists (primary)
+  become: true
+  shell: |
+    ceph auth del client.bootstrap-osd 2>/dev/null || true
+  args:
+    executable: /bin/bash
+  failed_when: false
+  changed_when: false
+  when: inventory_hostname == groups['ceph_monitors'][0]
+  run_once: true
+
+- name: Generate bootstrap-osd keyring (primary)
+  become: true
+  shell: |
+    ceph auth get-or-create client.bootstrap-osd mon 'allow profile bootstrap-osd' osd 'allow *' > /var/lib/ceph/bootstrap-osd/ceph.keyring
+  args:
+    executable: /bin/bash
+  when: inventory_hostname == groups['ceph_monitors'][0]
+  run_once: true
+
+- name: Fix bootstrap-osd keyring permissions (primary)
+  become: true
+  file:
+    path: /var/lib/ceph/bootstrap-osd/ceph.keyring
+    mode: "0644"
+    owner: ceph
+    group: ceph
+  when: inventory_hostname == groups['ceph_monitors'][0]
+  run_once: true
+
 # DASHBOARD: setup Ceph dashboard on primary monitor
 - name: Create mgr data directory (primary)
   become: true
@@ -217,6 +258,7 @@
     - { src: "/etc/ceph/ceph.conf" }
     - { src: "/etc/ceph/ceph.mon.keyring" }
     - { src: "/etc/ceph/ceph.client.admin.keyring" }
+    - { src: "/var/lib/ceph/bootstrap-osd/ceph.keyring" }
     - { src: "/tmp/monmap" }
   when: inventory_hostname == groups['ceph_monitors'][0] and not mon_initialized_stat.stat.exists
   run_once: true
