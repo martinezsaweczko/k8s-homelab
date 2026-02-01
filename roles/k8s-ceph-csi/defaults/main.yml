@@ -7,13 +7,13 @@ ceph_k8s_pool: kubernetes
 ceph_k8s_client: kubernetes
 
 # Kubeconfig for K8s access
-kubeconfig_path: /home/david/.kube/config
+kubeconfig_path: /var/snap/microk8s/current/credentials/client.config
 
 # CSI RBD StorageClass settings
 ceph_csi_storage_class: ceph-csi-rbd
 ceph_csi_rbd_image_features: layering
 ceph_csi_rbd_reclaim_policy: Delete
-ceph_csi_rbd_allow_expansion: "true"
+ceph_csi_rbd_allow_expansion: true
 
 # Test configuration
 enable_ceph_csi_test: false

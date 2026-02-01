@@ -6,12 +6,14 @@
     namespace: "{{ ceph_k8s_namespace }}"
     name: "{{ item.name }}"
     kubeconfig: "{{ kubeconfig_path }}"
+    verify_ssl: false
   loop:
     - { kind: Pod, name: ceph-test-pod }
     - { kind: PersistentVolumeClaim, name: ceph-test-pvc }
   failed_when: false
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
+    PYTHONHTTPSVERIFY: 0
 
 - name: Wait for resources to be cleaned up
   ansible.builtin.pause:
@@ -34,8 +36,10 @@
           requests:
             storage: "{{ ceph_csi_test_pvc_size }}"
     kubeconfig: "{{ kubeconfig_path }}"
+    verify_ssl: false
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
+    PYTHONHTTPSVERIFY: 0
 
 - name: Wait for PVC to bind
   kubernetes.core.k8s_info:
@@ -43,6 +47,7 @@
     namespace: "{{ ceph_k8s_namespace }}"
     name: ceph-test-pvc
     kubeconfig: "{{ kubeconfig_path }}"
+    verify_ssl: false
     wait: true
     wait_condition:
       type: Bound
@@ -51,6 +56,7 @@
     wait_timeout: 120
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
+    PYTHONHTTPSVERIFY: 0
   register: pvc_bound
 
 - name: Create test Pod
@@ -75,8 +81,10 @@
             persistentVolumeClaim:
               claimName: ceph-test-pvc
     kubeconfig: "{{ kubeconfig_path }}"
+    verify_ssl: false
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
+    PYTHONHTTPSVERIFY: 0
 
 - name: Wait for test Pod to be ready
   kubernetes.core.k8s_info:
@@ -84,6 +92,7 @@
     namespace: "{{ ceph_k8s_namespace }}"
     name: ceph-test-pod
     kubeconfig: "{{ kubeconfig_path }}"
+    verify_ssl: false
     wait: true
     wait_condition:
       type: Ready
@@ -92,6 +101,7 @@
     wait_timeout: 120
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
+    PYTHONHTTPSVERIFY: 0
   register: test_pod_ready
 
 - name: Write test file to Ceph volume
@@ -100,8 +110,10 @@
     pod: ceph-test-pod
     command: 'sh -c ''echo "Hello from Kubernetes at $(date)" > /data/test.txt'''
     kubeconfig: "{{ kubeconfig_path }}"
+    verify_ssl: false
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
+    PYTHONHTTPSVERIFY: 0
 
 - name: Read test file from Ceph volume
   kubernetes.core.k8s_exec:
@@ -109,8 +121,10 @@
     pod: ceph-test-pod
     command: "cat /data/test.txt"
     kubeconfig: "{{ kubeconfig_path }}"
+    verify_ssl: false
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
+    PYTHONHTTPSVERIFY: 0
   register: test_file_content
 
 - name: Display test results

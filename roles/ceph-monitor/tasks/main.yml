@@ -63,7 +63,7 @@
   when: inventory_hostname == groups['ceph_monitors'][0]
   run_once: true
   set_fact:
-    _monmap_args: "{{ (_monmap_args | default('')) + '--add ' + (hostvars[mon].get('ansible_hostname', mon)) + ' ' + (hostvars[mon].get('ansible_host', mon)) + ' ' }}"
+    _monmap_args: "{{ _monmap_args + '--add ' + (hostvars[mon].get('ansible_hostname', mon)) + ' v2:' + (hostvars[mon].get('ansible_host', mon)) + ':3300 ' }}"
   loop: "{{ groups['ceph_monitors'] }}"
   loop_control:
     loop_var: mon
@@ -207,36 +207,6 @@
   when: inventory_hostname == groups['ceph_monitors'][0]
   run_once: true
 
-- name: Delete old bootstrap-osd key if it exists (primary)
-  become: true
-  shell: |
-    ceph auth del client.bootstrap-osd 2>/dev/null || true
-  args:
-    executable: /bin/bash
-  failed_when: false
-  changed_when: false
-  when: inventory_hostname == groups['ceph_monitors'][0]
-  run_once: true
-
-- name: Generate bootstrap-osd keyring (primary)
-  become: true
-  shell: |
-    ceph auth get-or-create client.bootstrap-osd mon 'allow profile bootstrap-osd' osd 'allow *' > /var/lib/ceph/bootstrap-osd/ceph.keyring
-  args:
-    executable: /bin/bash
-  when: inventory_hostname == groups['ceph_monitors'][0]
-  run_once: true
-
-- name: Fix bootstrap-osd keyring permissions (primary)
-  become: true
-  file:
-    path: /var/lib/ceph/bootstrap-osd/ceph.keyring
-    mode: "0644"
-    owner: ceph
-    group: ceph
-  when: inventory_hostname == groups['ceph_monitors'][0]
-  run_once: true
-
 # DASHBOARD: setup Ceph dashboard on primary monitor
 - name: Create mgr data directory (primary)
   become: true
@@ -258,9 +228,8 @@
     - { src: "/etc/ceph/ceph.conf" }
     - { src: "/etc/ceph/ceph.mon.keyring" }
     - { src: "/etc/ceph/ceph.client.admin.keyring" }
-    - { src: "/var/lib/ceph/bootstrap-osd/ceph.keyring" }
     - { src: "/tmp/monmap" }
-  when: inventory_hostname == groups['ceph_monitors'][0] and not mon_initialized_stat.stat.exists
+  when: inventory_hostname == groups['ceph_monitors'][0]
   run_once: true
 
 # SECONDARY: copy files from controller (populated from primary) to other monitors and initialize
@@ -366,7 +335,7 @@
   become: true
   wait_for:
     host: "{{ hostvars[mon].get('ansible_host', mon) }}"
-    port: 6789
+    port: 3300
     timeout: 120
   loop: "{{ groups['ceph_monitors'] }}"
   loop_control:
@@ -374,24 +343,62 @@
   when: inventory_hostname == groups['ceph_monitors'][0]
   run_once: true
 
-- name: Verify cluster has quorum
+# - name: Verify cluster has quorum (using legacy port)
+#   become: true
+#   shell: |
+#     ceph -m {{ ansible_default_ipv4.address }} mon stat -f json | grep -q "quorum"
+#   register: quorum_check
+#   until: quorum_check.rc == 0
+#   retries: 24
+#   delay: 5
+#   when: inventory_hostname == groups['ceph_monitors'][0]
+#   run_once: true
+
+# - name: Enable msgr2 on cluster
+#   become: true
+#   shell: |
+#     ceph -m {{ ansible_default_ipv4.address }}:6789 mon enable-msgr2
+#   when: inventory_hostname == groups['ceph_monitors'][0]
+#   run_once: true
+
+# BOOTSTRAP-OSD: Create bootstrap-osd keyring after all monitors have quorum
+- name: Delete old bootstrap-osd key if it exists (after quorum)
   become: true
   shell: |
-    export CEPH_ARGS="--connect-timeout 5"
-    for i in {1..24}; do
-      if ceph mon stat -f json 2>/dev/null | grep -q "quorum"; then
-        echo "Cluster has quorum"
-        exit 0
-      fi
-      sleep 5
-    done
-    echo "Quorum not formed after 120 seconds"
-    exit 1
+    ceph auth del client.bootstrap-osd 2>/dev/null || true
+  args:
+    executable: /bin/bash
+  failed_when: false
+  changed_when: false
+  when: inventory_hostname == groups['ceph_monitors'][0]
+  run_once: true
+
+- name: Generate bootstrap-osd keyring (after quorum)
+  become: true
+  shell: |
+    ceph auth get-or-create client.bootstrap-osd mon 'allow profile bootstrap-osd' osd 'allow *' > /var/lib/ceph/bootstrap-osd/ceph.keyring
   args:
     executable: /bin/bash
   when: inventory_hostname == groups['ceph_monitors'][0]
   run_once: true
-  changed_when: false
+
+- name: Fix bootstrap-osd keyring permissions (after quorum)
+  become: true
+  file:
+    path: /var/lib/ceph/bootstrap-osd/ceph.keyring
+    mode: "0644"
+    owner: ceph
+    group: ceph
+  when: inventory_hostname == groups['ceph_monitors'][0]
+  run_once: true
+
+- name: Fetch bootstrap-osd keyring to controller (after generation)
+  fetch:
+    src: /var/lib/ceph/bootstrap-osd/ceph.keyring
+    dest: /tmp/ceph-setup/primary/
+    flat: yes
+  when: inventory_hostname == groups['ceph_monitors'][0]
+  run_once: true
 
 # PRIMARY MGR/DASHBOARD SETUP: now that quorum is formed
 - name: Create mgr keyring (primary)
@@ -514,7 +521,6 @@
     echo -n "$DASHBOARD_PWD" > /tmp/dashboard_pwd.txt
     ceph dashboard ac-user-create admin administrator --force-password -i /tmp/dashboard_pwd.txt 2>/dev/null || \
     ceph dashboard ac-user-set-password admin --force-password -i /tmp/dashboard_pwd.txt 2>/dev/null || true
-    rm -f /tmp/dashboard_pwd.txt
   args:
     executable: /bin/bash
   environment:

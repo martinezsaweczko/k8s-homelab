@@ -153,6 +153,42 @@
     var: osd_preflight.stdout_lines
   when: has_osd_devices
 
+- name: Check if device already has an OSD
+  ansible.builtin.shell: |
+    set -o pipefail
+    DEVICE="{{ item }}"
+    # Get the device name without /dev/ prefix
+    DEVNAME=$(basename "$DEVICE")
+
+    # Check if this device is already used in any OSD
+    if ceph-volume lvm list 2>/dev/null | grep -q "$DEVNAME"; then
+      echo "OSD_EXISTS"
+    else
+      echo "OSD_NOT_EXISTS"
+    fi
+  loop: "{{ ceph_osd_devices }}"
+  register: osd_device_check
+  changed_when: false
+  ignore_errors: true
+  when:
+    - has_osd_devices
+    - ceph_osd_devices is defined
+    - ceph_osd_devices | length > 0
+
+- name: Set facts for devices that already have OSDs
+  ansible.builtin.set_fact:
+    devices_with_osds: "{{ devices_with_osds | default([]) + [item.item] }}"
+  loop: "{{ osd_device_check.results }}"
+  when:
+    - has_osd_devices
+    - item.stdout is defined
+    - "'OSD_EXISTS' in item.stdout"
+
+- name: Display devices with existing OSDs
+  ansible.builtin.debug:
+    msg: "Devices with existing OSDs (will be skipped): {{ devices_with_osds | default([]) }}"
+  when: has_osd_devices
+
 - name: Prepare disk for OSD (unmount, wipe signatures and metadata)
   ansible.builtin.shell: |
     set -e
@@ -202,9 +238,16 @@
     - has_osd_devices
     - ceph_osd_devices is defined
     - ceph_osd_devices | length > 0
+    - item not in (devices_with_osds | default([]))
   become: true
   changed_when: true
   failed_when: false
+
+- name: Display skipped devices
+  ansible.builtin.debug:
+    msg: "Skipped disk preparation for {{ item }} (OSD already exists)"
+  loop: "{{ devices_with_osds | default([]) }}"
+  when: has_osd_devices
 
 - name: Prepare OSD devices (if available)
   ansible.builtin.shell: |

@@ -21,7 +21,8 @@
   import_playbook: ceph.yml
   tags:
     - ceph
-# - name: Setup Ceph CSI RBD for Kubernetes integration
-#   import_playbook: k8s-ceph-csi.yml
-#   tags:
-#     - k8s-ceph-csi
+
+- name: Setup Ceph CSI RBD for Kubernetes integration
+  import_playbook: k8s-ceph-csi.yml
+  tags:
+    - k8s-ceph-csi

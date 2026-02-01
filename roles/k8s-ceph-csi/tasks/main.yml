@@ -1,4 +1,20 @@
 ---
+- name: Get Ceph client.kubernetes keyring
+  ansible.builtin.command: sudo ceph auth get client.kubernetes
+  register: ceph_client_keyring
+  changed_when: false
+  run_once: true
+  delegate_to: "{{ groups['ceph_monitors'][0] }}"
+
+- name: Distribute ceph.client.kubernetes.keyring to all hosts
+  ansible.builtin.copy:
+    content: "{{ ceph_client_keyring.stdout }}\n"
+    dest: /etc/ceph/ceph.client.kubernetes.keyring
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+
 - name: Check if kubeconfig exists
   ansible.builtin.stat:
     path: "{{ kubeconfig_path }}"
@@ -8,7 +24,7 @@
 - name: Fail if kubeconfig not found
   ansible.builtin.fail:
     msg: "Kubeconfig not found at {{ kubeconfig_path }}. Please ensure Kubernetes is running and kubeconfig is copied."
-  when: falset kubeconfig_stat.stat.exists
+  when: not kubeconfig_stat.stat.exists
 
 - name: Create ceph-csi-rbd namespace
   kubernetes.core.k8s:
@@ -17,8 +33,10 @@
     kind: Namespace
     state: present
     kubeconfig: "{{ kubeconfig_path }}"
+    verify_ssl: false
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
+    PYTHONHTTPSVERIFY: 0
 
 - name: Add ceph-csi Helm repository
   kubernetes.core.helm_repository:
@@ -38,9 +56,9 @@
   register: ceph_mon_dump
   changed_when: false
 
-- name: Build monitor list from mon dump
+- name: Build monitor list from mon dump with port 3300
   ansible.builtin.set_fact:
-    ceph_monitors: "{{ (ceph_mon_dump.stdout | from_json).mons | map(attribute='addr') | map('regex_replace', '/.*$', '') | join(',') }}"
+    ceph_monitors: "{{ (ceph_mon_dump.stdout | from_json).mons | map(attribute='addr') | map('regex_replace', ':6789/.*$', ':3300') | map('regex_replace', '/.*$', '') | join(',') }}"
 
 - name: Get Ceph client.kubernetes key
   ansible.builtin.command: sudo ceph auth get-key client.kubernetes
@@ -65,9 +83,12 @@
           [global]
           fsid = {{ ceph_fsid.stdout }}
           mon_host = {{ ceph_monitors }}
+          ms_mode = msgr2
     kubeconfig: "{{ kubeconfig_path }}"
+    verify_ssl: false
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
+    PYTHONHTTPSVERIFY: 0
   no_log: true
 
 - name: Create ceph-secret in target namespace
@@ -87,9 +108,12 @@
           [global]
           fsid = {{ ceph_fsid.stdout }}
           mon_host = {{ ceph_monitors }}
+          ms_mode = msgr2
     kubeconfig: "{{ kubeconfig_path }}"
+    verify_ssl: false
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
+    PYTHONHTTPSVERIFY: 0
   no_log: true
 
 - name: Detect ready Kubernetes nodes
@@ -102,19 +126,82 @@
   ansible.builtin.set_fact:
     ceph_csi_provisioner_replicas: "{{ 1 if (ready_nodes.stdout | int) <= 1 else 3 }}"
 
+# - name: Remove existing Ceph CSI RBD Helm release if present
+#   kubernetes.core.helm:
+#     name: ceph-csi-rbd
+#     release_namespace: "{{ ceph_csi_namespace }}"
+#     state: absent
+#     kubeconfig: "{{ kubeconfig_path }}"
+#     verify_ssl: false
+#   environment:
+#     KUBECONFIG: "{{ kubeconfig_path }}"
+#     PYTHONHTTPSVERIFY: 0
+#   failed_when: false
+#   changed_when: false
+#   run_once: true
+
 - name: Install Ceph CSI RBD driver via Helm
   kubernetes.core.helm:
     name: ceph-csi-rbd
     chart_ref: ceph-csi/ceph-csi-rbd
     release_namespace: "{{ ceph_csi_namespace }}"
     values:
+      kubeletDir: /var/snap/microk8s/common/var/lib/kubelet
       cephClusterSecretName: ceph-secret
       cephClusterSecretNamespace: "{{ ceph_csi_namespace }}"
+      csiConfig:
+        - clusterID: "{{ ceph_fsid.stdout }}"
+          monitors:
+            - "{{ ceph_monitors }}"
+      provisioner:
+        replicaCount: "{{ ceph_csi_provisioner_replicas }}"
+      nodeplugin:
+        hostNetwork: true
+        tolerations:
+          - effect: NoExecute
+            key: node.kubernetes.io/not-ready
+            operator: Exists
+            tolerationSeconds: 300
+          - effect: NoExecute
+            key: node.kubernetes.io/unreachable
+            operator: Exists
+            tolerationSeconds: 300
+        plugins:
+          rbd:
+            enabled: true
+        serviceMonitor:
+          enabled: false
+        liveness:
+          enabled: false
+        livenessProbe:
+          enabled: false
+    # Post-installation task will remove the liveness sidecar if it exists
     wait: false
+    force: true
+    update_repo_cache: true
     kubeconfig: "{{ kubeconfig_path }}"
+    verify_ssl: false
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
+    PYTHONHTTPSVERIFY: 0
   register: ceph_csi_helm_install
+  run_once: true
+
+- name: Remove liveness-prometheus sidecar from nodeplugin DaemonSet
+  kubernetes.core.k8s_json_patch:
+    kind: DaemonSet
+    name: ceph-csi-rbd-nodeplugin
+    namespace: "{{ ceph_csi_namespace }}"
+    patch:
+      - op: remove
+        path: /spec/template/spec/containers/2
+    kubeconfig: "{{ kubeconfig_path }}"
+    verify_ssl: false
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+    PYTHONHTTPSVERIFY: 0
+  failed_when: false
+  run_once: true
 
 - name: Ensure provisioner replicas match node count
   kubernetes.core.k8s:
@@ -122,6 +209,7 @@
     name: ceph-csi-rbd-provisioner
     namespace: "{{ ceph_csi_namespace }}"
     kubeconfig: "{{ kubeconfig_path }}"
+    verify_ssl: false
     definition:
       apiVersion: apps/v1
       kind: Deployment
@@ -130,6 +218,9 @@
         namespace: "{{ ceph_csi_namespace }}"
       spec:
         replicas: "{{ ceph_csi_provisioner_replicas }}"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+    PYTHONHTTPSVERIFY: 0
   when: ceph_csi_helm_install is defined and ceph_csi_provisioner_replicas is defined
   register: scaled_provisioner
   failed_when: false
@@ -140,6 +231,7 @@
     namespace: "{{ ceph_csi_namespace }}"
     name: ceph-csi-rbd-provisioner
     kubeconfig: "{{ kubeconfig_path }}"
+    verify_ssl: false
     wait: true
     wait_condition:
       type: Available
@@ -148,6 +240,7 @@
     wait_timeout: 120
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
+    PYTHONHTTPSVERIFY: 0
 
 - name: Create StorageClass for Ceph RBD
   kubernetes.core.k8s:
@@ -171,8 +264,10 @@
       reclaimPolicy: "{{ ceph_csi_rbd_reclaim_policy }}"
       allowVolumeExpansion: "{{ ceph_csi_rbd_allow_expansion }}"
     kubeconfig: "{{ kubeconfig_path }}"
+    verify_ssl: false
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
+    PYTHONHTTPSVERIFY: 0
 
 - name: Display CSI RBD installation summary
   ansible.builtin.debug:
