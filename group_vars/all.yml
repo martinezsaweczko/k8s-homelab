@@ -15,7 +15,8 @@ k8s_microk8s_channel: "stable"
 # Ceph settings
 ceph_version: "quincy"
 ceph_release: "quincy"
-ceph_public_network: "192.168.56.0/24"
+# Real LAN of the mini PCs (172.26.20.x); 192.168.56.0/24 was the old Vagrant net
+ceph_public_network: "172.26.20.0/24"
 ceph_cluster_network: "0.0.0.0/0"
 
 # Storage pools

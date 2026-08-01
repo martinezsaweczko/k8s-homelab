@@ -1,0 +1,5 @@
+---
+# homelab1 = k8s1.martinez-saweczko.es (172.26.20.248)
+# OS disk: /dev/sda (btrfs). Spare disk for Ceph: /dev/nvme0n1 (Lexar 1TB)
+ceph_osd_devices:
+  - /dev/nvme0n1

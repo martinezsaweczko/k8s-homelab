@@ -68,6 +68,27 @@
         mode: "0755"
         force: true
 
+    # Multi-NIC hosts (e.g. extra USB NIC): without these pins kubelet/Calico
+    # may pick the wrong interface IP and break the pod network.
+    - name: Pin kubelet node IP to the default-route LAN address
+      ansible.builtin.lineinfile:
+        path: /var/snap/microk8s/current/args/kubelet
+        regexp: "^--node-ip="
+        line: "--node-ip={{ ansible_default_ipv4.address }}"
+        insertafter: EOF
+
+    - name: Check for Calico CNI manifest
+      ansible.builtin.stat:
+        path: /var/snap/microk8s/current/args/cni-network/cni.yaml
+      register: cni_yaml_stat
+
+    - name: Pin Calico IP autodetection to the default gateway
+      ansible.builtin.replace:
+        path: /var/snap/microk8s/current/args/cni-network/cni.yaml
+        regexp: "can-reach=[0-9.]+"
+        replace: "can-reach={{ ansible_default_ipv4.gateway }}"
+      when: cni_yaml_stat.stat.exists
+
     - name: Start MicroK8s service explicitly
       ansible.builtin.shell: |
         microk8s start
@@ -139,7 +160,7 @@
   block:
     - name: Create .kube directory
       ansible.builtin.file:
-        path: "/home/{{ ansible_user }}/.kube"
+        path: "{{ ansible_env.HOME }}/.kube"
         state: directory
         owner: "{{ ansible_user }}"
         group: "{{ ansible_user }}"
@@ -157,15 +178,15 @@
     - name: Write kubeconfig to user home
       ansible.builtin.copy:
         content: "{{ kubeconfig_content.stdout }}"
-        dest: "/home/{{ ansible_user }}/.kube/config"
+        dest: "{{ ansible_env.HOME }}/.kube/config"
         owner: "{{ ansible_user }}"
         group: "{{ ansible_user }}"
         mode: "0600"
 
     - name: Set KUBECONFIG environment variable
       ansible.builtin.lineinfile:
-        path: "/home/{{ ansible_user }}/.bashrc"
-        line: "export KUBECONFIG=/home/{{ ansible_user }}/.kube/config"
+        path: "{{ ansible_env.HOME }}/.bashrc"
+        line: "export KUBECONFIG={{ ansible_env.HOME }}/.kube/config"
         create: true
         mode: "0644"
 
@@ -226,9 +247,11 @@
   register: k8s_join_command
   changed_when: false
 
-- name: Extract join command
+- name: Extract join command (the one using the bootstrap master's LAN IP)
   ansible.builtin.set_fact:
-    microk8s_join_cmd: "{{ k8s_join_command.stdout_lines | select('search', '^microk8s join 192') | first }}"
+    microk8s_join_cmd: "{{ k8s_join_command.stdout_lines | select('search', '^microk8s join ' + _k8s_master_ip_regex) | first }}"
+  vars:
+    _k8s_master_ip_regex: "{{ hostvars[groups['k8s_masters'][0]]['ansible_default_ipv4']['address'] | regex_escape }}"
 
 - name: Debug inventory names on this host
   ansible.builtin.debug:

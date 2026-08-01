@@ -480,12 +480,14 @@
   when: inventory_hostname == groups['ceph_monitors'][0]
   run_once: true
 
-- name: Enable all available Ceph manager modules
+- name: Enable common Ceph manager modules
   become: true
   shell: |
     set +e
-    # List of common modules to enable
-    for module in balancer crash devicehealth influx iostat progress prometheus status telegraf telemetry rbd_support rgw osd_perf_query pg_autoscaler mds_autoscaler; do
+    # Keep this list conservative: several optional modules (influx, telegraf,
+    # rgw, nfs, osd_perf_query, mds_autoscaler, alerts) crash on Fedora's
+    # ceph-mgr build and spam the crash log / HEALTH_WARN.
+    for module in balancer crash devicehealth iostat progress prometheus status rbd_support pg_autoscaler; do
       ceph mgr module enable "$module" --force 2>/dev/null || true
     done
     set -e

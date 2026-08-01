@@ -10,6 +10,22 @@
       - lvm2
     state: present
 
+# Fedora 44 ships ceph-volume 20.2.2 with 'type': Optional[str] in
+# devices/lvm/common.py (--dmcrypt-*-opts args). Python 3.14 argparse
+# validates 'type' eagerly and crashes with "TypeError: str | None is not
+# callable", breaking 'ceph-volume lvm create'. Patch it to plain 'str'.
+- name: Locate ceph-volume lvm common.py
+  ansible.builtin.shell: |
+    python3 -c "import ceph_volume.devices.lvm.common as m; print(m.__file__)"
+  register: ceph_volume_common_py
+  changed_when: false
+
+- name: Patch ceph-volume Optional[str] argparse types (Python 3.14 crash)
+  ansible.builtin.replace:
+    path: "{{ ceph_volume_common_py.stdout }}"
+    regexp: "'type': Optional\\[str\\]"
+    replace: "'type': str"
+
 - name: Create Ceph OSD directories
   ansible.builtin.file:
     path: "{{ item }}"

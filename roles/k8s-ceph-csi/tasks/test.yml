@@ -41,23 +41,17 @@
     KUBECONFIG: "{{ kubeconfig_path }}"
     PYTHONHTTPSVERIFY: 0
 
+# NOTE: PVC binding is reported via status.phase=Bound; PVCs have no "Bound"
+# entry in status.conditions, so a k8s_info wait_condition on type=Bound never
+# matches. Poll the phase instead.
 - name: Wait for PVC to bind
-  kubernetes.core.k8s_info:
-    kind: PersistentVolumeClaim
-    namespace: "{{ ceph_k8s_namespace }}"
-    name: ceph-test-pvc
-    kubeconfig: "{{ kubeconfig_path }}"
-    verify_ssl: false
-    wait: true
-    wait_condition:
-      type: Bound
-      status: "True"
-    wait_sleep: 5
-    wait_timeout: 120
-  environment:
-    KUBECONFIG: "{{ kubeconfig_path }}"
-    PYTHONHTTPSVERIFY: 0
-  register: pvc_bound
+  ansible.builtin.shell: |
+    kubectl --kubeconfig {{ kubeconfig_path }} get pvc ceph-test-pvc -n {{ ceph_k8s_namespace }} -o jsonpath='{.status.phase}'
+  register: pvc_phase
+  until: "'Bound' in pvc_phase.stdout"
+  retries: 24
+  delay: 5
+  changed_when: false
 
 - name: Create test Pod
   kubernetes.core.k8s:

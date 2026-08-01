@@ -18,48 +18,49 @@ all:
     ceph_monitors:
       hosts:
         node1:
-          ansible_host: 192.168.56.101
-          ansible_user: david
-          node_hostname: homelab1
+          ansible_host: 172.26.20.249
+          ansible_user: root
+          node_hostname: k8s1.martinez-saweczko.es
         node2:
           ansible_host: 192.168.56.102
-          ansible_user: david
-          node_hostname: homelab2
+          ansible_user: root
+          node_hostname: k8s2.martinez-saweczko.es
         node3:
           ansible_host: 192.168.56.103
-          ansible_user: david
-          node_hostname: homelab3
+          ansible_user: root
+          node_hostname: k8s3.martinez-saweczko.es
     ceph_osds:
       hosts:
         node1:
-          ansible_host: 192.168.56.101
-          ansible_user: david
-          node_hostname: homelab1
+          ansible_host: 172.26.20.249
+          ansible_user: root
+          node_hostname: k8s1.martinez-saweczko.es
         node2:
           ansible_host: 192.168.56.102
-          ansible_user: david
-          node_hostname: homelab2
+          ansible_user: root
+          node_hostname: k8s2.martinez-saweczko.es
         node3:
           ansible_host: 192.168.56.103
-          ansible_user: david
-          node_hostname: homelab3
+          ansible_user: root
+          node_hostname: k8s3.martinez-saweczko.es
       vars:
         ceph_osd_devices:
+          - /dev/nmve0n1
           - /dev/sdb
     k8s_masters:
       hosts:
         node1:
-          ansible_host: 192.168.56.101
-          ansible_user: david
-          node_hostname: homelab1
+          ansible_host: 172.26.20.249
+          ansible_user: root
+          node_hostname: k8s1.martinez-saweczko.es
         node2:
           ansible_host: 192.168.56.102
-          ansible_user: david
-          node_hostname: homelab2
+          ansible_user: root
+          node_hostname: k8s2.martinez-saweczko.es
         node3:
           ansible_host: 192.168.56.103
-          ansible_user: david
-          node_hostname: homelab3
+          ansible_user: root
+          node_hostname: k8s3.martinez-saweczko.es
   vars:
     ansible_python_interpreter: /usr/bin/python3
     ansible_become: true

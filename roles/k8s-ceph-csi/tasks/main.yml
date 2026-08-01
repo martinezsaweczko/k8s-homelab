@@ -289,4 +289,5 @@
 
 - name: Test CSI RBD with PVC
   ansible.builtin.include_tasks: test.yml
+  run_once: true # k8s resources are cluster-wide; running on all masters races delete/create
   when: enable_ceph_csi_test | bool
