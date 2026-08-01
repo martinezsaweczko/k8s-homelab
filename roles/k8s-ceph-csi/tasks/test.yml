@@ -13,7 +13,7 @@
   failed_when: false
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
-    PYTHONHTTPSVERIFY: 0
+    PYTHONHTTPSVERIFY: "0"
 
 - name: Wait for resources to be cleaned up
   ansible.builtin.pause:
@@ -39,7 +39,7 @@
     verify_ssl: false
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
-    PYTHONHTTPSVERIFY: 0
+    PYTHONHTTPSVERIFY: "0"
 
 # NOTE: PVC binding is reported via status.phase=Bound; PVCs have no "Bound"
 # entry in status.conditions, so a k8s_info wait_condition on type=Bound never
@@ -78,7 +78,7 @@
     verify_ssl: false
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
-    PYTHONHTTPSVERIFY: 0
+    PYTHONHTTPSVERIFY: "0"
 
 - name: Wait for test Pod to be ready
   kubernetes.core.k8s_info:
@@ -95,7 +95,7 @@
     wait_timeout: 120
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
-    PYTHONHTTPSVERIFY: 0
+    PYTHONHTTPSVERIFY: "0"
   register: test_pod_ready
 
 - name: Write test file to Ceph volume
@@ -107,7 +107,7 @@
     verify_ssl: false
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
-    PYTHONHTTPSVERIFY: 0
+    PYTHONHTTPSVERIFY: "0"
 
 - name: Read test file from Ceph volume
   kubernetes.core.k8s_exec:
@@ -118,7 +118,7 @@
     verify_ssl: false
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
-    PYTHONHTTPSVERIFY: 0
+    PYTHONHTTPSVERIFY: "0"
   register: test_file_content
 
 - name: Display test results

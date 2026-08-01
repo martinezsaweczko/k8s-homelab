@@ -36,7 +36,7 @@
     verify_ssl: false
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
-    PYTHONHTTPSVERIFY: 0
+    PYTHONHTTPSVERIFY: "0"
 
 - name: Add ceph-csi Helm repository
   kubernetes.core.helm_repository:
@@ -58,7 +58,7 @@
 
 - name: Build monitor list from mon dump with port 3300
   ansible.builtin.set_fact:
-    ceph_monitors: "{{ (ceph_mon_dump.stdout | from_json).mons | map(attribute='addr') | map('regex_replace', ':6789/.*$', ':3300') | map('regex_replace', '/.*$', '') | join(',') }}"
+    ceph_monitors: "{{ (ceph_mon_dump.stdout | from_json).mons | map(attribute='addr') | map('regex_replace', ':[0-9]+/.*$', ':3300') | join(',') }}"
 
 - name: Get Ceph client.kubernetes key
   ansible.builtin.command: sudo ceph auth get-key client.kubernetes
@@ -88,7 +88,7 @@
     verify_ssl: false
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
-    PYTHONHTTPSVERIFY: 0
+    PYTHONHTTPSVERIFY: "0"
   no_log: true
 
 - name: Create ceph-secret in target namespace
@@ -113,7 +113,7 @@
     verify_ssl: false
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
-    PYTHONHTTPSVERIFY: 0
+    PYTHONHTTPSVERIFY: "0"
   no_log: true
 
 - name: Detect ready Kubernetes nodes
@@ -135,7 +135,7 @@
 #     verify_ssl: false
 #   environment:
 #     KUBECONFIG: "{{ kubeconfig_path }}"
-#     PYTHONHTTPSVERIFY: 0
+#     PYTHONHTTPSVERIFY: "0"
 #   failed_when: false
 #   changed_when: false
 #   run_once: true
@@ -183,7 +183,7 @@
     verify_ssl: false
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
-    PYTHONHTTPSVERIFY: 0
+    PYTHONHTTPSVERIFY: "0"
   register: ceph_csi_helm_install
   run_once: true
 
@@ -199,7 +199,7 @@
     verify_ssl: false
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
-    PYTHONHTTPSVERIFY: 0
+    PYTHONHTTPSVERIFY: "0"
   failed_when: false
   run_once: true
 
@@ -220,7 +220,7 @@
         replicas: "{{ ceph_csi_provisioner_replicas }}"
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
-    PYTHONHTTPSVERIFY: 0
+    PYTHONHTTPSVERIFY: "0"
   when: ceph_csi_helm_install is defined and ceph_csi_provisioner_replicas is defined
   register: scaled_provisioner
   failed_when: false
@@ -240,7 +240,7 @@
     wait_timeout: 120
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
-    PYTHONHTTPSVERIFY: 0
+    PYTHONHTTPSVERIFY: "0"
 
 - name: Create StorageClass for Ceph RBD
   kubernetes.core.k8s:
@@ -267,7 +267,7 @@
     verify_ssl: false
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
-    PYTHONHTTPSVERIFY: 0
+    PYTHONHTTPSVERIFY: "0"
 
 - name: Display CSI RBD installation summary
   ansible.builtin.debug:
