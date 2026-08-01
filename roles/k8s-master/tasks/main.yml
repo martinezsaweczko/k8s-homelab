@@ -284,7 +284,7 @@
     msg:
       - "cluster_nodes.stdout='{{ cluster_nodes.stdout | default('SKIPPED') }}'"
       - "node_hostname.stdout='{{ node_hostname.stdout | default('SKIPPED') }}'"
-      - "Check result: node already in cluster = {{ node_hostname.stdout in cluster_nodes.stdout | default('SKIPPED') }}"
+      - "Check result: node already in cluster = {{ (node_hostname.stdout | default('')) in (cluster_nodes.stdout | default('')) }}"
   delegate_to: "{{ groups['k8s_masters'][0] }}"
   when:
     - inventory_hostname != groups['k8s_masters'][0]
