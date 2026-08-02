@@ -59,6 +59,7 @@ See SETUP.md for detailed instructions.
 - Python 3.7+
 - SSH access to target hosts
 - **Fedora 38+, Ubuntu 20.04 LTS+, or RHEL 8+ on target hosts**
+- `gh` CLI authenticated on your admin machine (for Flux CD bootstrap and GitHub token access)
 
 ## Running the playbooks (as executed on this cluster)
 
@@ -208,78 +209,25 @@ rm -f /tmp/pwd.txt
 
 After the Ansible playbook finishes, **Flux CD** is automatically bootstrapped on the cluster. It watches the public GitOps repository [k8s-homelab-gitops](https://github.com/martinezsaweczko/k8s-homelab-gitops) and automatically deploys any committed changes.
 
-### Secrets Management (SOPS + Age)
+> **Note:** If your GitHub organization has Deploy Keys disabled, the `flux bootstrap` step will fail with a `422 Validation Failed` error. This is expected — the cluster still installs Flux controllers and the `sops-age` Secret. You only need to manually wire the GitRepository and Kustomization CRDs. See the full guide below.
 
-The GitOps repo is **public**. All Kubernetes Secrets are encrypted with [Mozilla SOPS](https://github.com/getsops/sops) + [Age](https://github.com/FiloSottile/age) before committing.
+### Full Setup & Troubleshooting Guide
 
-#### One-Time Setup (After Ansible Provisions the Cluster)
+See [docs/FLUX_GITOPS.md](docs/FLUX_GITOPS.md) for:
+- Prerequisites (`gh` CLI, `age`, `sops`)
+- One-time setup after Ansible (including the bootstrap workaround)
+- SOPS/Age encryption workflow
+- Day-to-day operations (adding apps, editing secrets, forcing reconciliation)
+- Disaster recovery
 
-1. **Verify the Age key exists** (Ansible should have generated it):
-   ```bash
-   cat ~/.config/sops/age/keys.txt
-   ```
+### Quick Reference
 
-2. **Back up the private key** — if you lose it, all encrypted secrets are unrecoverable:
-   - Store `~/.config/sops/age/keys.txt` in your password manager (1Password, Bitwarden, etc.)
-
-3. **Create `.sops.yaml` in the GitOps repo**:
-   ```bash
-   cd k8s-homelab-gitops
-   cat > .sops.yaml <<EOF
-   creation_rules:
-     - path_regex: cluster/.*\.sops\.yaml$
-       age: $(grep "Public key" ~/.config/sops/age/keys.txt | awk '{print $3}')
-   EOF
-   git add .sops.yaml
-   git commit -m "chore: add sops creation rules"
-   git push
-   ```
-
-4. **Encrypt your first secret**:
-   ```bash
-   # Create a plaintext Secret YAML
-   cat > secret.yaml <<'EOF'
-   apiVersion: v1
-   kind: Secret
-   metadata:
-     name: my-secret
-     namespace: default
-   type: Opaque
-   stringData:
-     password: my-secret-value
-   EOF
-
-   # Rename and encrypt
-   mv secret.yaml secret.sops.yaml
-   sops --encrypt --in-place secret.sops.yaml
-   ```
-
-5. **Install SOPS CLI** (if not installed):
-   ```bash
-   # Download from https://github.com/getsops/sops/releases
-   # Age is installed by Ansible: age --version
-   ```
-
-#### Day-to-Day Secret Editing
-
-```bash
-# Decrypt and open in your $EDITOR
-sops secret.sops.yaml
-
-# Or decrypt to stdout
-sops --decrypt secret.sops.yaml
-```
-
-#### How Flux Decrypts Automatically
-
-The Ansible playbook creates a Kubernetes Secret `sops-age` in the `flux-system` namespace containing the Age private key. Flux uses this to decrypt `.sops.yaml` files during reconciliation. The private key **never** leaves the cluster and never enters Git.
-
-### Adding a New Application
-
-1. Create a new directory under `cluster/apps/homelab/<app-name>/`
-2. Add your manifests (Deployment, Service, etc.)
-3. If you have Secrets, encrypt them as `*.sops.yaml`
-4. Commit and push — Flux deploys automatically
+| Task | Command |
+|------|---------|
+| Encrypt a secret | `sops --encrypt --in-place secret.sops.yaml` |
+| Edit an encrypted secret | `sops secret.sops.yaml` |
+| Force Flux to reconcile | `kubectl annotate --overwrite kustomization cluster -n flux-system reconcile.fluxcd.io/requestedAt="$(date +%s)"` |
+| Verify Flux status | `kubectl get kustomization -n flux-system cluster` |
 
 ## License
 
