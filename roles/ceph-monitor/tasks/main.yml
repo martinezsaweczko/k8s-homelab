@@ -28,18 +28,33 @@
     mode: "0755"
 
 # PRIMARY: run once on the first ceph monitor to create fsid, ceph.conf, keyrings and monmap
-- name: Generate cluster FSID (primary)
+- name: Check if cluster already has an FSID in ceph.conf (primary)
+  become: true
+  ansible.builtin.shell: |
+    set -o pipefail
+    grep -m1 '^[[:space:]]*fsid[[:space:]]*=' /etc/ceph/ceph.conf 2>/dev/null | awk -F= '{print $2}' | tr -d ' '
+  args:
+    executable: /bin/bash
+  register: existing_fsid
+  changed_when: false
+  failed_when: false
+  when: inventory_hostname == groups['ceph_monitors'][0]
+  run_once: true
+
+- name: Generate cluster FSID if not exists (primary)
   become: true
   ansible.builtin.command: uuidgen
-  register: ceph_fsid
-  when: inventory_hostname == groups['ceph_monitors'][0]
+  register: new_fsid
+  when:
+    - inventory_hostname == groups['ceph_monitors'][0]
+    - existing_fsid.stdout is not defined or existing_fsid.stdout | length == 0
   run_once: true
   changed_when: true
 
 - name: Set FSID fact (primary)
   become: true
   ansible.builtin.set_fact:
-    ceph_cluster_fsid: "{{ ceph_fsid.stdout }}"
+    ceph_cluster_fsid: "{{ existing_fsid.stdout | default(new_fsid.stdout) }}"
   when: inventory_hostname == groups['ceph_monitors'][0]
   run_once: true
 
@@ -376,26 +391,41 @@
 #   run_once: true
 
 # BOOTSTRAP-OSD: Create bootstrap-osd keyring after all monitors have quorum
-- name: Delete old bootstrap-osd key if it exists (after quorum)
+- name: Check if bootstrap-osd key already exists in cluster auth
   become: true
   ansible.builtin.shell: |
-    ceph auth del client.bootstrap-osd 2>/dev/null || true
+    ceph auth get client.bootstrap-osd 2>/dev/null
   args:
     executable: /bin/bash
-  failed_when: false
+  register: bootstrap_osd_key_check
   changed_when: false
+  failed_when: false
   when: inventory_hostname == groups['ceph_monitors'][0]
   run_once: true
 
-- name: Generate bootstrap-osd keyring (after quorum)
+- name: Generate bootstrap-osd keyring if not exists (after quorum)
   become: true
   ansible.builtin.shell: |
     ceph auth get-or-create client.bootstrap-osd mon 'allow profile bootstrap-osd' osd 'allow *' > /var/lib/ceph/bootstrap-osd/ceph.keyring
   args:
     executable: /bin/bash
-  when: inventory_hostname == groups['ceph_monitors'][0]
+  when:
+    - inventory_hostname == groups['ceph_monitors'][0]
+    - bootstrap_osd_key_check.rc != 0
   run_once: true
   changed_when: true
+
+- name: Write existing bootstrap-osd keyring to file if already exists
+  become: true
+  ansible.builtin.shell: |
+    ceph auth get client.bootstrap-osd > /var/lib/ceph/bootstrap-osd/ceph.keyring
+  args:
+    executable: /bin/bash
+  when:
+    - inventory_hostname == groups['ceph_monitors'][0]
+    - bootstrap_osd_key_check.rc == 0
+  run_once: true
+  changed_when: false
 
 - name: Fix bootstrap-osd keyring permissions (after quorum)
   become: true
