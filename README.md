@@ -204,6 +204,83 @@ ceph dashboard ac-user-set-password admin -i /tmp/pwd.txt
 rm -f /tmp/pwd.txt
 ```
 
+## GitOps with Flux CD
+
+After the Ansible playbook finishes, **Flux CD** is automatically bootstrapped on the cluster. It watches the public GitOps repository [k8s-homelab-gitops](https://github.com/martinezsaweczko/k8s-homelab-gitops) and automatically deploys any committed changes.
+
+### Secrets Management (SOPS + Age)
+
+The GitOps repo is **public**. All Kubernetes Secrets are encrypted with [Mozilla SOPS](https://github.com/getsops/sops) + [Age](https://github.com/FiloSottile/age) before committing.
+
+#### One-Time Setup (After Ansible Provisions the Cluster)
+
+1. **Verify the Age key exists** (Ansible should have generated it):
+   ```bash
+   cat ~/.config/sops/age/keys.txt
+   ```
+
+2. **Back up the private key** — if you lose it, all encrypted secrets are unrecoverable:
+   - Store `~/.config/sops/age/keys.txt` in your password manager (1Password, Bitwarden, etc.)
+
+3. **Create `.sops.yaml` in the GitOps repo**:
+   ```bash
+   cd k8s-homelab-gitops
+   cat > .sops.yaml <<EOF
+   creation_rules:
+     - path_regex: cluster/.*\.sops\.yaml$
+       age: $(grep "Public key" ~/.config/sops/age/keys.txt | awk '{print $3}')
+   EOF
+   git add .sops.yaml
+   git commit -m "chore: add sops creation rules"
+   git push
+   ```
+
+4. **Encrypt your first secret**:
+   ```bash
+   # Create a plaintext Secret YAML
+   cat > secret.yaml <<'EOF'
+   apiVersion: v1
+   kind: Secret
+   metadata:
+     name: my-secret
+     namespace: default
+   type: Opaque
+   stringData:
+     password: my-secret-value
+   EOF
+
+   # Rename and encrypt
+   mv secret.yaml secret.sops.yaml
+   sops --encrypt --in-place secret.sops.yaml
+   ```
+
+5. **Install SOPS CLI** (if not installed):
+   ```bash
+   # Download from https://github.com/getsops/sops/releases
+   # Age is installed by Ansible: age --version
+   ```
+
+#### Day-to-Day Secret Editing
+
+```bash
+# Decrypt and open in your $EDITOR
+sops secret.sops.yaml
+
+# Or decrypt to stdout
+sops --decrypt secret.sops.yaml
+```
+
+#### How Flux Decrypts Automatically
+
+The Ansible playbook creates a Kubernetes Secret `sops-age` in the `flux-system` namespace containing the Age private key. Flux uses this to decrypt `.sops.yaml` files during reconciliation. The private key **never** leaves the cluster and never enters Git.
+
+### Adding a New Application
+
+1. Create a new directory under `cluster/apps/homelab/<app-name>/`
+2. Add your manifests (Deployment, Service, etc.)
+3. If you have Secrets, encrypt them as `*.sops.yaml`
+4. Commit and push — Flux deploys automatically
+
 ## License
 
 See LICENSE file
