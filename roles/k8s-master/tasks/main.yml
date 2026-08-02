@@ -335,3 +335,114 @@
     KUBECONFIG: /var/snap/microk8s/current/credentials/client.config
   when:
     - inventory_hostname != groups['k8s_masters'][0]
+
+- name: Generate Age keypair for SOPS secrets (admin machine)
+  delegate_to: localhost
+  become: false
+  block:
+    - name: Ensure Age key directory exists on admin machine
+      ansible.builtin.file:
+        path: "{{ lookup('env', 'HOME') }}/.config/sops/age"
+        state: directory
+        mode: "0700"
+
+    - name: Generate Age keypair if not exists
+      ansible.builtin.shell: |
+        age-keygen -o "{{ lookup('env', 'HOME') }}/.config/sops/age/keys.txt"
+      args:
+        creates: "{{ lookup('env', 'HOME') }}/.config/sops/age/keys.txt"
+      register: age_keygen
+      changed_when: age_keygen.rc == 0
+
+    - name: Extract Age public key
+      ansible.builtin.shell: |
+        set -o pipefail
+        grep "Public key" "{{ lookup('env', 'HOME') }}/.config/sops/age/keys.txt" | awk '{print $3}'
+      register: age_public_key
+      changed_when: false
+
+    - name: Display Age public key and backup warning
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Age key generated or already exists"
+          - "Public key: {{ age_public_key.stdout }}"
+          - "=========================================="
+          - "BACK UP ~/.config/sops/age/keys.txt"
+          - "If you lose this file, all encrypted secrets"
+          - "in the GitOps repo are UNRECOVERABLE."
+          - "Store it in your password manager."
+          - "=========================================="
+
+- name: Install Flux CLI and bootstrap GitOps (first master only)
+  when: inventory_hostname == groups['k8s_masters'][0]
+  block:
+    - name: Download Flux installer
+      ansible.builtin.get_url:
+        url: https://fluxcd.io/install.sh
+        dest: /tmp/flux-install.sh
+        mode: "0755"
+      register: flux_download
+      changed_when: flux_download.status_code == 200
+
+    - name: Install Flux CLI
+      ansible.builtin.command: /tmp/flux-install.sh
+      args:
+        creates: /usr/local/bin/flux
+
+    - name: Get GitHub token from admin machine
+      ansible.builtin.shell: |
+        gh auth token
+      delegate_to: localhost
+      become: false
+      register: github_token_raw
+      changed_when: false
+      no_log: true
+
+    - name: Bootstrap Flux CD
+      ansible.builtin.shell: |
+        export GITHUB_TOKEN="{{ github_token_raw.stdout }}"
+        flux bootstrap github \
+          --owner=martinezsaweczko \
+          --repository=k8s-homelab-gitops \
+          --branch=main \
+          --path=cluster \
+          --private=false
+      environment:
+        KUBECONFIG: "{{ ansible_env.HOME }}/.kube/config"
+      register: flux_bootstrap
+      changed_when: "'installed components' in flux_bootstrap.stdout"
+      failed_when: false
+
+    - name: Create sops-age secret in flux-system namespace
+      ansible.builtin.shell: |
+        set -o pipefail
+        export PRIVATE_KEY=$(grep "AGE-SECRET-KEY" "{{ lookup('env', 'HOME') }}/.config/sops/age/keys.txt")
+        microk8s kubectl create secret generic sops-age \
+          --namespace=flux-system \
+          --from-literal=age.agekey="$PRIVATE_KEY" \
+          --dry-run=client -o yaml > /tmp/sops-age.yaml
+        microk8s kubectl apply -f /tmp/sops-age.yaml
+        rm -f /tmp/sops-age.yaml
+      delegate_to: localhost
+      become: false
+      changed_when: true
+      no_log: true
+
+    - name: Display GitOps next steps
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Flux CD bootstrapped successfully"
+          - "GitOps repo: https://github.com/martinezsaweczko/k8s-homelab-gitops"
+          - "=========================================="
+          - "Next steps on your admin machine:"
+          - "1. cd k8s-homelab-gitops"
+          - "2. Create .sops.yaml:"
+          - "   creation_rules:"
+          - "     - path_regex: cluster/.*\\.sops\\.yaml$"
+          - "       age: {{ age_public_key.stdout }}"
+          - "3. Encrypt secrets: sops --encrypt secret.yaml > secret.sops.yaml"
+          - "4. Commit and push — Flux deploys automatically"
+          - "=========================================="
+      when: flux_bootstrap.rc == 0
