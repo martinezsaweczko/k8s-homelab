@@ -357,7 +357,9 @@
     - name: Extract Age public key
       ansible.builtin.shell: |
         set -o pipefail
-        grep "Public key" "{{ lookup('env', 'HOME') }}/.config/sops/age/keys.txt" | awk '{print $3}'
+        grep -i "public key" "{{ lookup('env', 'HOME') }}/.config/sops/age/keys.txt" | awk '{print $3}'
+      args:
+        executable: /bin/bash
       register: age_public_key
       changed_when: false
 
@@ -399,6 +401,13 @@
       changed_when: false
       no_log: true
 
+    - name: Check if Flux CD is already bootstrapped
+      ansible.builtin.shell: |
+        microk8s kubectl get deployment source-controller -n flux-system --ignore-not-found 2>/dev/null
+      register: flux_installed_check
+      changed_when: false
+      failed_when: false
+
     - name: Bootstrap Flux CD
       ansible.builtin.shell: |
         export GITHUB_TOKEN="{{ github_token_raw.stdout }}"
@@ -413,19 +422,32 @@
       register: flux_bootstrap
       changed_when: "'installed components' in flux_bootstrap.stdout"
       failed_when: false
+      when: flux_installed_check.stdout | length == 0
+
+    - name: Read Age private key from admin machine
+      ansible.builtin.shell: |
+        grep "AGE-SECRET-KEY" "{{ lookup('env', 'HOME') }}/.config/sops/age/keys.txt"
+      delegate_to: localhost
+      become: false
+      register: _age_private_key
+      changed_when: false
+      no_log: true
 
     - name: Create sops-age secret in flux-system namespace
       ansible.builtin.shell: |
         set -o pipefail
-        export PRIVATE_KEY=$(grep "AGE-SECRET-KEY" "{{ lookup('env', 'HOME') }}/.config/sops/age/keys.txt")
+        microk8s kubectl create namespace flux-system --dry-run=client -o yaml | microk8s kubectl apply -f -
         microk8s kubectl create secret generic sops-age \
           --namespace=flux-system \
-          --from-literal=age.agekey="$PRIVATE_KEY" \
+          --from-literal=age.agekey="$AGE_KEY" \
           --dry-run=client -o yaml > /tmp/sops-age.yaml
         microk8s kubectl apply -f /tmp/sops-age.yaml
         rm -f /tmp/sops-age.yaml
-      delegate_to: localhost
-      become: false
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ ansible_env.HOME }}/.kube/config"
+        AGE_KEY: "{{ _age_private_key.stdout }}"
       changed_when: true
       no_log: true
 

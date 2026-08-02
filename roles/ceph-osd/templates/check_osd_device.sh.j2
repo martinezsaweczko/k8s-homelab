@@ -1,0 +1,37 @@
+#!/bin/bash
+set -o pipefail
+
+DEVICE="{{ item }}"
+DEVNAME=$(basename "$DEVICE")
+CURRENT_FSID="{{ ceph_conf_fsid.stdout }}"
+
+# 1. Is there an active systemd service for an OSD on this device?
+ACTIVE_OSDS=$(systemctl list-units --type=service --no-pager --no-legend --all | grep -oE 'ceph-osd@[0-9]+' || true)
+for svc in $ACTIVE_OSDS; do
+  id=${svc#ceph-osd@}
+  # check if this service's data dir points to this device
+  if [ -L "/var/lib/ceph/osd/ceph-$id/block" ] && ls -l "/var/lib/ceph/osd/ceph-$id/block" 2>/dev/null | grep -q "$DEVNAME"; then
+    echo "OSD_ACTIVE"
+    exit 0
+  fi
+done
+
+# 2. Check ceph-volume for any metadata
+if ceph-volume lvm list 2>/dev/null | grep -q "$DEVNAME"
+then
+  : # device known, continue below
+else
+  echo "OSD_NOT_EXISTS"
+  exit 0
+fi
+
+OSD_FSID=$(ceph-volume lvm list 2>/dev/null | awk -v dev="$DEVNAME" '
+  /osd fsid/ { fsid=$3 }
+  /devices/  { if ($0 ~ dev) print fsid }
+' | head -n1)
+
+if [ "$OSD_FSID" = "$CURRENT_FSID" ]; then
+  echo "OSD_EXISTS"
+else
+  echo "OSD_STALE"
+fi

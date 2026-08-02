@@ -94,18 +94,13 @@
     owner: ceph
     group: ceph
 
-- name: Check if bootstrap-osd keyring exists locally
-  ansible.builtin.stat:
-    path: /var/lib/ceph/bootstrap-osd/ceph.keyring
-  register: bootstrap_osd_keyring_local
-
-- name: Get bootstrap-osd keyring from monitor (if not local)
+- name: Get current bootstrap-osd keyring from primary monitor
   ansible.builtin.slurp:
     src: /var/lib/ceph/bootstrap-osd/ceph.keyring
   register: ceph_bootstrap_osd_keyring_content
   delegate_to: "{{ groups['ceph_monitors'][0] }}"
-  when: not bootstrap_osd_keyring_local.stat.exists
-  ignore_errors: true
+  become: true
+  changed_when: false
 
 - name: Write bootstrap-osd keyring to local OSD
   ansible.builtin.copy:
@@ -114,9 +109,14 @@
     mode: "0644"
     owner: ceph
     group: ceph
-  when:
-    - not bootstrap_osd_keyring_local.stat.exists
-    - ceph_bootstrap_osd_keyring_content is defined
+  when: ceph_bootstrap_osd_keyring_content is defined
+
+- name: Ensure bootstrap-osd keyring is also in /etc/ceph (ceph CLI looks here)
+  ansible.builtin.file:
+    src: /var/lib/ceph/bootstrap-osd/ceph.keyring
+    dest: /etc/ceph/ceph.client.bootstrap-osd.keyring
+    state: link
+    force: true
 
 - name: Check if OSD devices are explicitly configured
   ansible.builtin.set_fact:
@@ -169,110 +169,169 @@
     var: osd_preflight.stdout_lines
   when: has_osd_devices
 
-- name: Check if device already has an OSD
+- name: Read current cluster FSID
   ansible.builtin.shell: |
     set -o pipefail
-    DEVICE="{{ item }}"
-    # Get the device name without /dev/ prefix
-    DEVNAME=$(basename "$DEVICE")
+    grep -m1 '^[[:space:]]*fsid[[:space:]]*=' /etc/ceph/ceph.conf | awk -F= '{print $2}' | tr -d ' '
+  args:
+    executable: /bin/bash
+  register: ceph_conf_fsid
+  changed_when: false
 
-    # Check if this device is already used in any OSD
-    if ceph-volume lvm list 2>/dev/null | grep -q "$DEVNAME"; then
-      echo "OSD_EXISTS"
-    else
-      echo "OSD_NOT_EXISTS"
-    fi
+- name: Discover existing OSDs on this host and their service status
+  ansible.builtin.shell: |
+    set -o pipefail
+    # List systemd ceph-osd services and their state
+    systemctl list-units --type=service --no-pager --no-legend --all | grep -oE 'ceph-osd@[0-9]+' | sort -u | while read svc; do
+      id=${svc#ceph-osd@}
+      state=$(systemctl show "$svc" -p ActiveState --value)
+      echo "${id}:${state}"
+    done
+  args:
+    executable: /bin/bash
+  register: osd_services_discovery
+  changed_when: false
+  failed_when: false
+
+- name: Build fact map of active OSD IDs
+  ansible.builtin.set_fact:
+    _active_osd_ids: "{{ _active_osd_ids | default([]) + [item.split(':')[0]] }}"
+  loop: "{{ osd_services_discovery.stdout_lines | default([]) }}"
+  when:
+    - item is defined
+    - item | length > 0
+    - item.split(':')[1] | default('') == 'active'
+
+- name: Build fact map of failed OSD IDs
+  ansible.builtin.set_fact:
+    _failed_osd_ids: "{{ _failed_osd_ids | default([]) + [item.split(':')[0]] }}"
+  loop: "{{ osd_services_discovery.stdout_lines | default([]) }}"
+  when:
+    - item is defined
+    - item | length > 0
+    - item.split(':')[1] | default('') == 'failed'
+
+- name: Display discovered OSD service states
+  ansible.builtin.debug:
+    msg: |
+      Active OSD services (will be skipped entirely): {{ _active_osd_ids | default([]) }}
+      Failed OSD services (will be cleaned + recreated): {{ _failed_osd_ids | default([]) }}
+      Current cluster FSID: {{ ceph_conf_fsid.stdout }}
+  when: has_osd_devices
+
+- name: Check ceph-volume metadata for each configured device
+  ansible.builtin.script: check_osd_device.sh.j2
   loop: "{{ ceph_osd_devices }}"
   register: osd_device_check
   changed_when: false
-  ignore_errors: true
+  failed_when: false
   when:
     - has_osd_devices
     - ceph_osd_devices is defined
     - ceph_osd_devices | length > 0
 
-- name: Set facts for devices that already have OSDs
+- name: Set facts for devices with active running OSDs
   ansible.builtin.set_fact:
-    devices_with_osds: "{{ devices_with_osds | default([]) + [item.item] }}"
+    devices_with_active_osds: "{{ devices_with_active_osds | default([]) + [item.item] }}"
+  loop: "{{ osd_device_check.results }}"
+  when:
+    - has_osd_devices
+    - item.stdout is defined
+    - "'OSD_ACTIVE' in item.stdout"
+
+- name: Set facts for devices with valid but inactive OSDs
+  ansible.builtin.set_fact:
+    devices_with_valid_osds: "{{ devices_with_valid_osds | default([]) + [item.item] }}"
   loop: "{{ osd_device_check.results }}"
   when:
     - has_osd_devices
     - item.stdout is defined
     - "'OSD_EXISTS' in item.stdout"
 
-- name: Display devices with existing OSDs
+- name: Set facts for devices with stale OSDs (different cluster or failed)
+  ansible.builtin.set_fact:
+    devices_with_stale_osds: "{{ devices_with_stale_osds | default([]) + [item.item] }}"
+  loop: "{{ osd_device_check.results }}"
+  when:
+    - has_osd_devices
+    - item.stdout is defined
+    - "'OSD_STALE' in item.stdout"
+
+- name: Display device scan results
   ansible.builtin.debug:
-    msg: "Devices with existing OSDs (will be skipped): {{ devices_with_osds | default([]) }}"
+    msg: |
+      Devices with ACTIVE OSDs (skipped): {{ devices_with_active_osds | default([]) }}
+      Devices with valid inactive OSDs (will be activated): {{ devices_with_valid_osds | default([]) }}
+      Devices with stale OSDs (will be wiped): {{ devices_with_stale_osds | default([]) }}
   when: has_osd_devices
 
-- name: Prepare disk for OSD (unmount, wipe signatures and metadata)
+- name: Forcefully clean stale Ceph LVM and disk metadata
   ansible.builtin.shell: |
-    set -e
     set -o pipefail
     DEVICE="{{ item }}"
-    echo "Preparing $DEVICE for Ceph OSD..."
+    DEVNAME=$(basename "$DEVICE")
+    echo "Forcefully cleaning $DEVICE for Ceph OSD..."
 
-    # Check if device exists
-    if [ ! -e "$DEVICE" ]; then
-      echo "ERROR: Device $DEVICE not found!"
-      exit 1
-    fi
+    # Find OSD IDs tied to this device
+    STALE_OSD_IDS=$(ceph-volume lvm list 2>/dev/null | awk -v dev="$DEVNAME" '
+      /osd id/      { id=$3 }
+      /devices/       { if ($0 ~ dev && id != "") print id }
+    ' | sort -u)
+    for osd_id in $STALE_OSD_IDS; do
+      echo "Stopping and disabling stale ceph-osd@$osd_id for device $DEVNAME"
+      systemctl stop "ceph-osd@$osd_id" 2>/dev/null || true
+      systemctl disable "ceph-osd@$osd_id" 2>/dev/null || true
+    done
 
-    # Show current mounts and LVM usage for debugging
-    lsblk -o NAME,FSTYPE,SIZE,MOUNTPOINT $DEVICE || true
-    mount | grep "$DEVICE" || true
+    # Remove LVM structures
+    for lv in $(lvs --noheadings -o lv_name,vg_name,devices 2>/dev/null | grep "$DEVNAME" | awk '{print $2"/"$1}' || true); do
+      echo "Removing stale LV /dev/$lv"
+      lvremove -f -y "/dev/$lv" 2>/dev/null || true
+    done
+    for vg in $(vgs --noheadings -o vg_name,pv_name 2>/dev/null | grep "$DEVNAME" | awk '{print $1}' || true); do
+      echo "Removing stale VG $vg"
+      vgremove -f -y "$vg" 2>/dev/null || true
+    done
 
-    # Unmount any mounted partitions
-    for mp in $(lsblk -ln -o MOUNTPOINT ${DEVICE}* | grep -v '^$' || true); do
-      echo "Unmounting $mp"
-      sudo umount -l "$mp" || true
-    done || true
+    pvremove -f -y "$DEVICE" 2>/dev/null || true
+    wipefs -a "$DEVICE" 2>/dev/null || true
+    dd if=/dev/zero of="$DEVICE" bs=1M count=100 2>/dev/null || true
+    sync
 
-    # Remove any LVM physical volumes / volume groups referencing this device
-    for pv in $(pvs --noheadings -o pv_name 2>/dev/null | awk '{print $1}' || true); do
-      if echo "$pv" | grep -q "$(basename $DEVICE)"; then
-        echo "Removing PV $pv and associated VG"
-        sudo pvremove -ff "$pv" || true
+    for osd_id in $STALE_OSD_IDS; do
+      osd_dir="/var/lib/ceph/osd/ceph-$osd_id"
+      if [ -d "$osd_dir" ]; then
+        echo "Removing stale OSD dir $osd_dir"
+        rm -rf "$osd_dir"
       fi
-    done || true
+    done
 
-    # Wipe filesystem signatures and partition table
-    if wipefs -a "$DEVICE" 2>/dev/null; then
-      echo "wipefs cleared signatures on $DEVICE"
-    fi
-
-    # Use sgdisk to zap the device as fallback
-    sudo sgdisk -Z "$DEVICE" 2>/dev/null || true
-
-    # Flush and rescan
-    sudo partprobe "$DEVICE" 2>/dev/null || true
-    sudo dd if=/dev/zero of="$DEVICE" bs=1M count=100 2>/dev/null || true
-    sudo sync || true
-    sleep 2
+    echo "Done cleaning $DEVICE"
+  args:
+    executable: /bin/bash
   loop: "{{ ceph_osd_devices }}"
   when:
     - has_osd_devices
     - ceph_osd_devices is defined
     - ceph_osd_devices | length > 0
-    - item not in (devices_with_osds | default([]))
+    - item in (devices_with_stale_osds | default([]))
   become: true
   changed_when: true
   failed_when: false
 
-- name: Display skipped devices
-  ansible.builtin.debug:
-    msg: "Skipped disk preparation for {{ item }} (OSD already exists)"
-  loop: "{{ devices_with_osds | default([]) }}"
-  when: has_osd_devices
-
 - name: Prepare OSD devices (if available)
   ansible.builtin.shell: |
     ceph-volume lvm create --data {{ item }}
+  args:
+    executable: /bin/bash
   loop: "{{ ceph_osd_devices }}"
   when:
     - has_osd_devices
     - ceph_osd_devices is defined
     - ceph_osd_devices | length > 0
+    - item not in (devices_with_active_osds | default([]))
+    - item not in (devices_with_valid_osds | default([]))
+  become: true
   changed_when: true
   failed_when: false
 
@@ -282,6 +341,7 @@
   register: prepared_osd_fsids
   changed_when: false
   ignore_errors: true
+  become: true
 
 - name: Activate prepared OSDs by FSID
   ansible.builtin.shell: |
@@ -290,6 +350,7 @@
   when:
     - has_osd_devices
     - prepared_osd_fsids.stdout_lines | length > 0
+  become: true
   changed_when: true
   failed_when: false
 
@@ -299,6 +360,7 @@
   register: discovered_osd_ids
   changed_when: false
   ignore_errors: true
+  become: true
   when:
     - has_osd_devices
 
@@ -317,16 +379,16 @@
 - name: Wait for OSDs to join cluster
   ansible.builtin.shell: |
     set -o pipefail
-    ceph osd tree 2>/dev/null | grep -q "up" || ceph -s | grep -q "osd: 1"
+    ceph osd tree 2>/dev/null | grep -q "up" || ceph -s | grep -q "osd: [1-9]"
   register: osds_status
   until: osds_status.rc == 0
-  retries: 10
-  delay: 3
+  retries: 30
+  delay: 5
   changed_when: false
   failed_when: false
   when:
     - has_osd_devices
-    - discovered_osd_ids.stdout_lines | length > 0
+    - (devices_with_stale_osds | default([])) | length > 0 or (devices_with_valid_osds | default([])) | length > 0
 
 - name: Confirm monitor-only setup
   ansible.builtin.debug:
