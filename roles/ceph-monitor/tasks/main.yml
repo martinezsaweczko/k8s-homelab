@@ -27,6 +27,17 @@
     group: root
     mode: "0755"
 
+- name: Check if Ceph monitor service is already active  # noqa command-instead-of-module
+  ansible.builtin.command: |
+    systemctl is-active ceph-mon@{{ hostvars[inventory_hostname].get('ansible_hostname', inventory_hostname) }}
+  register: ceph_mon_status
+  failed_when: false
+  changed_when: false
+
+- name: Set fact to skip monitor initialization if already running
+  ansible.builtin.set_fact:
+    ceph_monitor_running: "{{ ceph_mon_status.rc | default(1) == 0 }}"
+
 # PRIMARY: run once on the first ceph monitor to create fsid, ceph.conf, keyrings and monmap
 - name: Check if cluster already has an FSID in ceph.conf (primary)
   become: true
@@ -38,7 +49,7 @@
   register: existing_fsid
   changed_when: false
   failed_when: false
-  when: inventory_hostname == groups['ceph_monitors'][0]
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
   run_once: true
 
 - name: Generate cluster FSID if not exists (primary)
@@ -55,7 +66,7 @@
   become: true
   ansible.builtin.set_fact:
     ceph_cluster_fsid: "{{ existing_fsid.stdout | default(new_fsid.stdout) }}"
-  when: inventory_hostname == groups['ceph_monitors'][0]
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
   run_once: true
 
 - name: Render ceph.conf on primary
@@ -66,17 +77,17 @@
     owner: root
     group: root
     mode: "0644"
-  when: inventory_hostname == groups['ceph_monitors'][0]
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
   run_once: true
 
 - name: Build monmap arguments (primary)
-  when: inventory_hostname == groups['ceph_monitors'][0]
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
   run_once: true
   ansible.builtin.set_fact:
     _monmap_args: ""
 
 - name: Append monmap args per monitor (primary)
-  when: inventory_hostname == groups['ceph_monitors'][0]
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
   run_once: true
   ansible.builtin.set_fact:
     _monmap_args: "{{ _monmap_args + '--add ' + (hostvars[mon].get('ansible_hostname', mon)) + ' v2:' + (hostvars[mon].get('ansible_host', mon)) + ':3300 ' }}"
@@ -88,7 +99,7 @@
 - name: Debug monmap args (primary)
   ansible.builtin.debug:
     msg: "_monmap_args={{ _monmap_args }}"
-  when: inventory_hostname == groups['ceph_monitors'][0]
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
   run_once: true
 
 - name: Check if keyrings already exist (primary)
@@ -96,7 +107,7 @@
   ansible.builtin.stat:
     path: /etc/ceph/ceph.mon.keyring
   register: mon_keyring_stat
-  when: inventory_hostname == groups['ceph_monitors'][0]
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
   run_once: true
 
 - name: Create monitor keyrings and monmap (primary)
@@ -115,7 +126,7 @@
     monmaptool --create {{ _monmap_args }} /tmp/monmap
   args:
     executable: /bin/bash
-  when: inventory_hostname == groups['ceph_monitors'][0] and not mon_keyring_stat.stat.exists
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running and not mon_keyring_stat.stat.exists
   run_once: true
   changed_when: true
 
@@ -123,14 +134,14 @@
   become: true
   ansible.builtin.command: monmaptool --print /tmp/monmap
   register: monmap_raw
-  when: inventory_hostname == groups['ceph_monitors'][0]
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
   run_once: true
   changed_when: false
 
 - name: Extract FSID raw line from monmap output (primary)
   ansible.builtin.set_fact:
     _monmap_fsid_raw: "{{ monmap_raw.stdout_lines | select('match', '^fsid') | list | first | default('') }}"
-  when: inventory_hostname == groups['ceph_monitors'][0]
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
   run_once: true
 
 - name: Clean and set monmap fsid fact (primary)
@@ -151,13 +162,13 @@
     value: "{{ monmap_fsid }}"
     backup: true
     mode: "0644"
-  when: inventory_hostname == groups['ceph_monitors'][0] and monmap_fsid is defined and monmap_fsid != ''
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running and monmap_fsid is defined and monmap_fsid != ''
   run_once: true
 
 - name: Debug monmap args (primary)
   ansible.builtin.debug:
     msg: "_monmap_args={{ _monmap_args }}"
-  when: inventory_hostname == groups['ceph_monitors'][0]
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
   run_once: true
 
 - name: Check if monitor already initialized (primary)
@@ -165,7 +176,7 @@
   ansible.builtin.stat:
     path: "/var/lib/ceph/mon/ceph-{{ hostvars[groups['ceph_monitors'][0]]['ansible_hostname'] }}/store.db"
   register: mon_initialized_stat
-  when: inventory_hostname == groups['ceph_monitors'][0]
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
   run_once: true
 
 - name: Create monitor data directory (primary)
@@ -176,7 +187,7 @@
     owner: root
     group: root
     mode: "0755"
-  when: inventory_hostname == groups['ceph_monitors'][0] and not mon_initialized_stat.stat.exists
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running and not mon_initialized_stat.stat.exists
   run_once: true
 
 - name: Initialize monitor (mkfs) on primary
@@ -187,7 +198,7 @@
     ceph-mon -i "$mon_name" --mkfs --monmap /tmp/monmap --keyring /etc/ceph/ceph.mon.keyring
   args:
     executable: /bin/bash
-  when: inventory_hostname == groups['ceph_monitors'][0] and not mon_initialized_stat.stat.exists
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running and not mon_initialized_stat.stat.exists
   run_once: true
   changed_when: true
 
@@ -199,7 +210,7 @@
     group: ceph
     recurse: true
     mode: "0750"
-  when: inventory_hostname == groups['ceph_monitors'][0] and not mon_initialized_stat.stat.exists
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running and not mon_initialized_stat.stat.exists
   run_once: true
 
 - name: Ensure keyrings ownership and permissions (primary)
@@ -212,7 +223,7 @@
   loop:
     - ceph.mon.keyring
     - ceph.client.admin.keyring
-  when: inventory_hostname == groups['ceph_monitors'][0] and not mon_initialized_stat.stat.exists
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running and not mon_initialized_stat.stat.exists
   run_once: true
 
 - name: Enable and start ceph-mon service (primary)
@@ -221,7 +232,13 @@
     name: "ceph-mon@{{ hostvars[groups['ceph_monitors'][0]]['ansible_hostname'] }}"
     enabled: true
     state: started
-  when: inventory_hostname == groups['ceph_monitors'][0]
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
+  run_once: true
+
+- name: Pause to let primary monitor fully initialize
+  ansible.builtin.pause:
+    seconds: 10
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
   run_once: true
 
 - name: Create bootstrap-osd keyring directory (primary)
@@ -232,7 +249,7 @@
     mode: "0755"
     owner: ceph
     group: ceph
-  when: inventory_hostname == groups['ceph_monitors'][0]
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
   run_once: true
 
 # DASHBOARD: setup Ceph dashboard on primary monitor
@@ -244,7 +261,7 @@
     owner: ceph
     group: ceph
     mode: "0750"
-  when: inventory_hostname == groups['ceph_monitors'][0]
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
   run_once: true
 
 - name: Fetch primary ceph files to controller
@@ -262,7 +279,7 @@
 
 # SECONDARY: copy files from controller (populated from primary) to other monitors and initialize
 - name: Wait for primary SSH to be reachable (others)
-  when: inventory_hostname != groups['ceph_monitors'][0]
+  when: inventory_hostname != groups['ceph_monitors'][0] and not ceph_monitor_running
   ansible.builtin.wait_for:
     host: "{{ hostvars[groups['ceph_monitors'][0]].ansible_default_ipv4.address | default(hostvars[groups['ceph_monitors'][0]].ansible_host) }}"
     port: 22
@@ -276,7 +293,7 @@
     owner: root
     group: root
     mode: "0644"
-  when: inventory_hostname != groups['ceph_monitors'][0]
+  when: inventory_hostname != groups['ceph_monitors'][0] and not ceph_monitor_running
 
 - name: Copy monmap to /tmp/monmap on host
   become: true
@@ -286,7 +303,7 @@
     owner: root
     group: root
     mode: "0644"
-  when: inventory_hostname != groups['ceph_monitors'][0]
+  when: inventory_hostname != groups['ceph_monitors'][0] and not ceph_monitor_running
 
 - name: Copy keyrings to monitor
   become: true
@@ -299,7 +316,7 @@
   with_items:
     - ceph.mon.keyring
     - ceph.client.admin.keyring
-  when: inventory_hostname != groups['ceph_monitors'][0]
+  when: inventory_hostname != groups['ceph_monitors'][0] and not ceph_monitor_running
 
 - name: Create monitor data directory
   become: true
@@ -309,14 +326,21 @@
     owner: ceph
     group: ceph
     mode: "0750"
-  when: inventory_hostname != groups['ceph_monitors'][0]
+  when: inventory_hostname != groups['ceph_monitors'][0] and not ceph_monitor_running
 
-- name: Check if monitor already initialized (secondary)
+- name: Clean monitor data directory if not empty (secondary)
   become: true
-  ansible.builtin.stat:
-    path: "/var/lib/ceph/mon/ceph-{{ hostvars[inventory_hostname].get('ansible_hostname', inventory_hostname) }}/store.db"
-  register: mon_initialized_secondary_stat
-  when: inventory_hostname != groups['ceph_monitors'][0]
+  ansible.builtin.shell: |
+    set -o pipefail
+    mon_dir="/var/lib/ceph/mon/ceph-{{ hostvars[inventory_hostname].get('ansible_hostname', inventory_hostname) }}"
+    if [ -d "$mon_dir" ] && [ "$(ls -A "$mon_dir" 2>/dev/null | wc -l)" -gt 0 ]; then
+      echo "Cleaning stale monitor data"
+      rm -rf "${mon_dir:?}"/*
+    fi
+  args:
+    executable: /bin/bash
+  when: inventory_hostname != groups['ceph_monitors'][0] and not ceph_monitor_running
+  changed_when: true
 
 - name: Initialize monitor (mkfs) on secondary
   become: true
@@ -326,7 +350,7 @@
     ceph-mon -i "$mon_name" --mkfs --monmap /tmp/monmap --keyring /etc/ceph/ceph.mon.keyring
   args:
     executable: /bin/bash
-  when: inventory_hostname != groups['ceph_monitors'][0] and not mon_initialized_secondary_stat.stat.exists
+  when: inventory_hostname != groups['ceph_monitors'][0] and not ceph_monitor_running
   changed_when: true
 
 - name: Ensure monitor data directory ownership (secondary)
@@ -337,7 +361,7 @@
     group: ceph
     recurse: true
     mode: "0750"
-  when: inventory_hostname != groups['ceph_monitors'][0] and not mon_initialized_secondary_stat.stat.exists
+  when: inventory_hostname != groups['ceph_monitors'][0] and not ceph_monitor_running
 
 - name: Ensure keyrings ownership and permissions (secondary)
   become: true
@@ -349,7 +373,14 @@
   loop:
     - ceph.mon.keyring
     - ceph.client.admin.keyring
-  when: inventory_hostname != groups['ceph_monitors'][0] and not mon_initialized_secondary_stat.stat.exists
+  when: inventory_hostname != groups['ceph_monitors'][0] and not ceph_monitor_running
+
+- name: Wait for primary monitor to be ready before starting secondary
+  ansible.builtin.wait_for:
+    host: "{{ hostvars[groups['ceph_monitors'][0]].ansible_host }}"
+    port: 3300
+    timeout: 120
+  when: inventory_hostname != groups['ceph_monitors'][0] and not ceph_monitor_running
 
 - name: Enable and start ceph-mon service (secondary)
   become: true
@@ -357,7 +388,8 @@
     name: "ceph-mon@{{ hostvars[inventory_hostname].get('ansible_hostname', inventory_hostname) }}"
     enabled: true
     state: started
-  when: inventory_hostname != groups['ceph_monitors'][0]
+  when: inventory_hostname != groups['ceph_monitors'][0] and not ceph_monitor_running
+  failed_when: false
 
 # QUORUM SYNCHRONIZATION: Wait for all monitors to form quorum before mgr setup
 - name: Wait for all monitors to form quorum (before mgr setup)
@@ -380,14 +412,14 @@
 #   until: quorum_check.rc == 0
 #   retries: 24
 #   delay: 5
-#   when: inventory_hostname == groups['ceph_monitors'][0]
+#   when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
 #   run_once: true
 
 # - name: Enable msgr2 on cluster
 #   become: true
 #   shell: |
 #     ceph -m {{ ansible_default_ipv4.address }}:6789 mon enable-msgr2
-#   when: inventory_hostname == groups['ceph_monitors'][0]
+#   when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
 #   run_once: true
 
 # BOOTSTRAP-OSD: Create bootstrap-osd keyring after all monitors have quorum
@@ -400,7 +432,7 @@
   register: bootstrap_osd_key_check
   changed_when: false
   failed_when: false
-  when: inventory_hostname == groups['ceph_monitors'][0]
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
   run_once: true
 
 - name: Generate bootstrap-osd keyring if not exists (after quorum)
@@ -411,7 +443,7 @@
     executable: /bin/bash
   when:
     - inventory_hostname == groups['ceph_monitors'][0]
-    - bootstrap_osd_key_check.rc != 0
+    - bootstrap_osd_key_check.rc | default(0) != 0
   run_once: true
   changed_when: true
 
@@ -423,7 +455,7 @@
     executable: /bin/bash
   when:
     - inventory_hostname == groups['ceph_monitors'][0]
-    - bootstrap_osd_key_check.rc == 0
+    - bootstrap_osd_key_check.rc | default(1) == 0
   run_once: true
   changed_when: false
 
@@ -434,7 +466,7 @@
     mode: "0644"
     owner: ceph
     group: ceph
-  when: inventory_hostname == groups['ceph_monitors'][0]
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
   run_once: true
 
 - name: Fetch bootstrap-osd keyring to controller (after generation)
@@ -442,7 +474,7 @@
     src: /var/lib/ceph/bootstrap-osd/ceph.keyring
     dest: /tmp/ceph-setup/primary/
     flat: true
-  when: inventory_hostname == groups['ceph_monitors'][0]
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
   run_once: true
 
 # PRIMARY MGR/DASHBOARD SETUP: now that quorum is formed
@@ -459,14 +491,14 @@
     fi
   args:
     executable: /bin/bash
-  when: inventory_hostname == groups['ceph_monitors'][0]
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
   run_once: true
   changed_when: true
 
 # - name: Reinstall ceph-mgr package to restore service file (primary)
 #   become: true
 #   shell: dnf reinstall -y ceph-mgr
-#   when: inventory_hostname == groups['ceph_monitors'][0]
+#   when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
 #   run_once: true
 
 - name: Create override directory for ceph-mgr (primary)
@@ -475,7 +507,7 @@
     path: /etc/systemd/system/ceph-mgr@.service.d
     state: directory
     mode: "0755"
-  when: inventory_hostname == groups['ceph_monitors'][0]
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
   run_once: true
 
 - name: Create override.conf to ensure service works (primary)
@@ -485,14 +517,14 @@
       [Unit]
     dest: /etc/systemd/system/ceph-mgr@.service.d/override.conf
     mode: "0644"
-  when: inventory_hostname == groups['ceph_monitors'][0]
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
   run_once: true
 
 - name: Reload systemd daemon (primary)
   become: true
   ansible.builtin.systemd:
     daemon_reload: true
-  when: inventory_hostname == groups['ceph_monitors'][0]
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
   run_once: true
   changed_when: false
 
@@ -505,7 +537,7 @@
     systemctl start "ceph-mgr@${mon_name}"
   args:
     executable: /bin/bash
-  when: inventory_hostname == groups['ceph_monitors'][0]
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
   run_once: true
   changed_when: true
 
@@ -516,7 +548,7 @@
   until: mgr_status.rc == 0
   retries: 12
   delay: 5
-  when: inventory_hostname == groups['ceph_monitors'][0]
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
   run_once: true
   changed_when: false
 
@@ -526,7 +558,7 @@
   register: dashboard_enable
   failed_when: dashboard_enable.rc != 0 and 'already enabled' not in dashboard_enable.stderr
   changed_when: "'already enabled' not in dashboard_enable.stderr"
-  when: inventory_hostname == groups['ceph_monitors'][0]
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
   run_once: true
 
 - name: Enable common Ceph manager modules
@@ -542,55 +574,54 @@
     set -e
   args:
     executable: /bin/bash
-  when: inventory_hostname == groups['ceph_monitors'][0]
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
   run_once: true
   changed_when: false
 
-- name: Set dashboard SSL and port (optional, for simplicity)
+- name: Set dashboard SSL port (Ceph 20.2.2 requires SSL)
   become: true
   ansible.builtin.shell: |
-    set +e
-    # Try to disable SSL if supported in this version
-    ceph config set mgr mgr/dashboard/ssl false 2>/dev/null || true
-    # Set dashboard port
-    ceph config set mgr mgr/dashboard/server_port {{ ceph_dashboard_port | default('8080') }} 2>/dev/null || true
-    # Set dashboard address
-    ceph config set mgr mgr/dashboard/server_addr 0.0.0.0 2>/dev/null || true
     set -e
+    # Ceph 20.2.2 dashboard always uses SSL; the ssl setting is ignored
+    # Set the SSL port and bind address
+    ceph config set mgr mgr/dashboard/ssl_server_port {{ ceph_dashboard_port | default('8443') }}
+    ceph config set mgr mgr/dashboard/server_addr 0.0.0.0
   args:
     executable: /bin/bash
-  when: inventory_hostname == groups['ceph_monitors'][0]
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
   run_once: true
-  changed_when: false
+  changed_when: true
 
 - name: Create or update dashboard admin user
   become: true
   vars:
     dashboard_pwd: "{{ ceph_dashboard_password | default('admin') }}"
   ansible.builtin.shell: |
+    set -e
     export CEPH_ARGS="--connect-timeout 5"
     echo -n "$DASHBOARD_PWD" > /tmp/dashboard_pwd.txt
+    # Try to create user first; if user exists, update password
     ceph dashboard ac-user-create admin administrator --force-password -i /tmp/dashboard_pwd.txt 2>/dev/null || \
-    ceph dashboard ac-user-set-password admin --force-password -i /tmp/dashboard_pwd.txt 2>/dev/null || true
+    ceph dashboard ac-user-set-password admin --force-password -i /tmp/dashboard_pwd.txt
   args:
     executable: /bin/bash
   environment:
     DASHBOARD_PWD: "{{ dashboard_pwd }}"
-  when: inventory_hostname == groups['ceph_monitors'][0]
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
   run_once: true
-  changed_when: false
+  changed_when: true
 
 - name: Display dashboard access information
   ansible.builtin.debug:
     msg:
-      - "Ceph Dashboard is now available with High Availability!"
+      - "Ceph Dashboard is now available!"
       - "Active mgr (dashboard): Check with 'ceph mgr stat'"
-      - "Access via any monitor IP: http://<monitor-ip>:{{ ceph_dashboard_port | default('8080') }}"
+      - "Access via any monitor IP: https://<monitor-ip>:{{ ceph_dashboard_port | default('8443') }}"
       - "Monitor IPs: {{ groups['ceph_monitors'] | map('extract', hostvars, 'ansible_host') | list | join(', ') }}"
       - "Username: admin"
       - "Password: {{ ceph_dashboard_password | default('admin') }}"
-      - "Note: Dashboard will automatically failover to standby mgr if active fails"
-  when: inventory_hostname == groups['ceph_monitors'][0]
+      - "Note: Dashboard requires HTTPS. Self-signed cert is auto-generated."
+  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
   run_once: true
 
 # DASHBOARD HA: setup standby mgr on secondary monitors
@@ -602,7 +633,7 @@
     owner: ceph
     group: ceph
     mode: "0750"
-  when: inventory_hostname != groups['ceph_monitors'][0]
+  when: inventory_hostname != groups['ceph_monitors'][0] and not ceph_monitor_running
 
 - name: Create mgr keyring (secondary)
   become: true
@@ -617,13 +648,13 @@
     fi
   args:
     executable: /bin/bash
-  when: inventory_hostname != groups['ceph_monitors'][0]
+  when: inventory_hostname != groups['ceph_monitors'][0] and not ceph_monitor_running
   changed_when: true
 
 - name: Reinstall ceph-mgr package to restore service file (secondary)
   become: true
   ansible.builtin.command: dnf reinstall -y ceph-mgr
-  when: inventory_hostname != groups['ceph_monitors'][0]
+  when: inventory_hostname != groups['ceph_monitors'][0] and not ceph_monitor_running
   changed_when: true
 
 - name: Create override directory for ceph-mgr (secondary)
@@ -632,7 +663,7 @@
     path: /etc/systemd/system/ceph-mgr@.service.d
     state: directory
     mode: "0755"
-  when: inventory_hostname != groups['ceph_monitors'][0]
+  when: inventory_hostname != groups['ceph_monitors'][0] and not ceph_monitor_running
 
 - name: Create override.conf to ensure service works (secondary)
   become: true
@@ -641,13 +672,13 @@
       [Unit]
     dest: /etc/systemd/system/ceph-mgr@.service.d/override.conf
     mode: "0644"
-  when: inventory_hostname != groups['ceph_monitors'][0]
+  when: inventory_hostname != groups['ceph_monitors'][0] and not ceph_monitor_running
 
 - name: Reload systemd daemon (secondary)
   become: true
   ansible.builtin.systemd:
     daemon_reload: true
-  when: inventory_hostname != groups['ceph_monitors'][0]
+  when: inventory_hostname != groups['ceph_monitors'][0] and not ceph_monitor_running
   changed_when: false
 
 - name: Enable and start ceph-mgr service (secondary)
@@ -659,7 +690,7 @@
     systemctl start "ceph-mgr@${mon_name}"
   args:
     executable: /bin/bash
-  when: inventory_hostname != groups['ceph_monitors'][0]
+  when: inventory_hostname != groups['ceph_monitors'][0] and not ceph_monitor_running
   changed_when: true
 
 - name: Display HA dashboard information
@@ -667,4 +698,4 @@
     msg:
       - "Standby mgr daemon is now running on {{ inventory_hostname }}"
       - "This mgr will automatically take over if the active mgr fails"
-  when: inventory_hostname != groups['ceph_monitors'][0]
+  when: inventory_hostname != groups['ceph_monitors'][0] and not ceph_monitor_running
