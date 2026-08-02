@@ -68,6 +68,13 @@
         mode: "0755"
         force: true
 
+    - name: Create k alias for kubectl
+      ansible.builtin.file:
+        src: /usr/local/bin/kubectl
+        dest: /usr/local/bin/k
+        state: link
+        force: true
+
     # Multi-NIC hosts (e.g. extra USB NIC): without these pins kubelet/Calico
     # may pick the wrong interface IP and break the pod network.
     - name: Pin kubelet node IP to the default-route LAN address
