@@ -173,52 +173,42 @@
   ansible.builtin.shell: |
     set -o pipefail
     grep -m1 '^[[:space:]]*fsid[[:space:]]*=' /etc/ceph/ceph.conf | awk -F= '{print $2}' | tr -d ' '
+  args:
+    executable: /bin/bash
   register: ceph_conf_fsid
   changed_when: false
 
-- name: Check if device already has an OSD for current cluster
-  ansible.builtin.shell: |
-    set -o pipefail
-    DEVICE="{{ item }}"
-    DEVNAME=$(basename "$DEVICE")
-    CURRENT_FSID="{{ ceph_conf_fsid.stdout }}"
 
-    # Check if ceph-volume knows this device
-    if ! ceph-volume lvm list 2>/dev/null | grep -q "$DEVNAME"; then
-      echo "OSD_NOT_EXISTS"
-      exit 0
-    fi
-
-    # Device is used by some OSD — check whether it belongs to the current cluster
-    OSD_FSID=$(ceph-volume lvm list 2>/dev/null | awk -v dev="$DEVNAME" '
-      /osd fsid/ { fsid=$3 }
-      /devices/  { if ($0 ~ dev) print fsid }
-    ' | head -n1)
-
-    if [ "$OSD_FSID" = "$CURRENT_FSID" ]; then
-      echo "OSD_EXISTS"
-    else
-      echo "OSD_STALE"
-    fi
+- name: Check ceph-volume metadata for each configured device
+  ansible.builtin.script: check_osd_device.sh {{ item }} {{ ceph_conf_fsid.stdout }}
   loop: "{{ ceph_osd_devices }}"
   register: osd_device_check
   changed_when: false
-  ignore_errors: true
+  failed_when: false
   when:
     - has_osd_devices
     - ceph_osd_devices is defined
     - ceph_osd_devices | length > 0
 
-- name: Set facts for devices that already have OSDs for current cluster
+- name: Set facts for devices with active running OSDs
   ansible.builtin.set_fact:
-    devices_with_osds: "{{ devices_with_osds | default([]) + [item.item] }}"
+    devices_with_active_osds: "{{ devices_with_active_osds | default([]) + [item.item] }}"
+  loop: "{{ osd_device_check.results }}"
+  when:
+    - has_osd_devices
+    - item.stdout is defined
+    - "'OSD_ACTIVE' in item.stdout"
+
+- name: Set facts for devices with valid but inactive OSDs
+  ansible.builtin.set_fact:
+    devices_with_valid_osds: "{{ devices_with_valid_osds | default([]) + [item.item] }}"
   loop: "{{ osd_device_check.results }}"
   when:
     - has_osd_devices
     - item.stdout is defined
     - "'OSD_EXISTS' in item.stdout"
 
-- name: Set facts for devices with stale OSDs (different cluster)
+- name: Set facts for devices with stale OSDs (different cluster or failed)
   ansible.builtin.set_fact:
     devices_with_stale_osds: "{{ devices_with_stale_osds | default([]) + [item.item] }}"
   loop: "{{ osd_device_check.results }}"
@@ -230,8 +220,8 @@
 - name: Display device scan results
   ansible.builtin.debug:
     msg: |
-      Current cluster FSID: {{ ceph_conf_fsid.stdout }}
-      Devices with valid OSDs (will be skipped): {{ devices_with_osds | default([]) }}
+      Devices with ACTIVE OSDs (skipped): {{ devices_with_active_osds | default([]) }}
+      Devices with valid inactive OSDs (will be activated): {{ devices_with_valid_osds | default([]) }}
       Devices with stale OSDs (will be wiped): {{ devices_with_stale_osds | default([]) }}
   when: has_osd_devices
 
@@ -242,7 +232,7 @@
     DEVNAME=$(basename "$DEVICE")
     echo "Forcefully cleaning $DEVICE for Ceph OSD..."
 
-    # 1. Find any OSD IDs tied to this device and stop only those services
+    # Find OSD IDs tied to this device
     STALE_OSD_IDS=$(ceph-volume lvm list 2>/dev/null | awk -v dev="$DEVNAME" '
       /osd id/      { id=$3 }
       /devices/       { if ($0 ~ dev && id != "") print id }
@@ -253,31 +243,21 @@
       systemctl disable "ceph-osd@$osd_id" 2>/dev/null || true
     done
 
-    # 2. Remove any Ceph logical volumes that use this device
+    # Remove LVM structures
     for lv in $(lvs --noheadings -o lv_name,vg_name,devices 2>/dev/null | grep "$DEVNAME" | awk '{print $2"/"$1}' || true); do
       echo "Removing stale LV /dev/$lv"
       lvremove -f -y "/dev/$lv" 2>/dev/null || true
     done
-
-    # 3. Remove any Ceph volume groups that reference this device
     for vg in $(vgs --noheadings -o vg_name,pv_name 2>/dev/null | grep "$DEVNAME" | awk '{print $1}' || true); do
       echo "Removing stale VG $vg"
       vgremove -f -y "$vg" 2>/dev/null || true
     done
 
-    # 4. Remove the physical volume signature
-    echo "Removing PV signature from $DEVICE"
     pvremove -f -y "$DEVICE" 2>/dev/null || true
-
-    # 5. Wipe filesystem and partition signatures
-    echo "Wiping signatures on $DEVICE"
     wipefs -a "$DEVICE" 2>/dev/null || true
-
-    # 6. Zero out the first 100MB to kill any remaining bluestore/LVM headers
     dd if=/dev/zero of="$DEVICE" bs=1M count=100 2>/dev/null || true
     sync
 
-    # 7. Clean up stale OSD data directories for the OSD IDs we found
     for osd_id in $STALE_OSD_IDS; do
       osd_dir="/var/lib/ceph/osd/ceph-$osd_id"
       if [ -d "$osd_dir" ]; then
@@ -294,7 +274,7 @@
     - has_osd_devices
     - ceph_osd_devices is defined
     - ceph_osd_devices | length > 0
-    - item not in (devices_with_osds | default([]))
+    - item in (devices_with_stale_osds | default([]))
   become: true
   changed_when: true
   failed_when: false
@@ -302,12 +282,15 @@
 - name: Prepare OSD devices (if available)
   ansible.builtin.shell: |
     ceph-volume lvm create --data {{ item }}
+  args:
+    executable: /bin/bash
   loop: "{{ ceph_osd_devices }}"
   when:
     - has_osd_devices
     - ceph_osd_devices is defined
     - ceph_osd_devices | length > 0
-    - item not in (devices_with_osds | default([]))
+    - item not in (devices_with_active_osds | default([]))
+    - item not in (devices_with_valid_osds | default([]))
   become: true
   changed_when: true
   failed_when: false
@@ -365,7 +348,7 @@
   failed_when: false
   when:
     - has_osd_devices
-    - discovered_osd_ids.stdout_lines | length > 0
+    - (devices_with_stale_osds | default([])) | length > 0 or (devices_with_valid_osds | default([])) | length > 0
 
 - name: Confirm monitor-only setup
   ansible.builtin.debug:
@@ -399,12 +382,12 @@
 
 - name: Create Ceph RBD client for Kubernetes
   ansible.builtin.shell: |
-    timeout 10 ceph auth get-or-create client.kubernetes \
+    ceph auth get-or-create client.kubernetes \
       mon 'profile rbd' \
-      osd 'profile rbd pool=kubernetes' 2>/dev/null || true
+      osd 'profile rbd pool=kubernetes'
   register: ceph_client_key
-  changed_when: false
-  ignore_errors: true
+  changed_when: ceph_client_key.rc == 0
+  failed_when: false
   when: inventory_hostname == groups['ceph_monitors'][0]
 
 - name: Display Ceph RBD client key

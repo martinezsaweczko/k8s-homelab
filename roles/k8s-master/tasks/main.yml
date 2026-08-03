@@ -401,6 +401,13 @@
       changed_when: false
       no_log: true
 
+    - name: Check if Flux CD is already bootstrapped
+      ansible.builtin.shell: |
+        microk8s kubectl get deployment source-controller -n flux-system --ignore-not-found 2>/dev/null
+      register: flux_installed_check
+      changed_when: false
+      failed_when: false
+
     - name: Bootstrap Flux CD
       ansible.builtin.shell: |
         export GITHUB_TOKEN="{{ github_token_raw.stdout }}"
@@ -415,6 +422,7 @@
       register: flux_bootstrap
       changed_when: "'installed components' in flux_bootstrap.stdout"
       failed_when: false
+      when: flux_installed_check.stdout | length == 0
 
     - name: Read Age private key from admin machine
       ansible.builtin.shell: |
@@ -459,4 +467,4 @@
           - "3. Encrypt secrets: sops --encrypt secret.yaml > secret.sops.yaml"
           - "4. Commit and push — Flux deploys automatically"
           - "=========================================="
-      when: flux_bootstrap.rc == 0
+      when: flux_bootstrap.rc | default(0) == 0
