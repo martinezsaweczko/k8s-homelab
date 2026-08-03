@@ -1,0 +1,10 @@
+---
+# handlers for ceph-monitor role
+
+- name: Restart ceph-mgr daemon
+  become: true
+  ansible.builtin.systemd:
+    name: "ceph-mgr@{{ hostvars[inventory_hostname].get('ansible_hostname', inventory_hostname) }}"
+    state: restarted
+  register: mgr_restart
+  failed_when: mgr_restart is failed and 'Could not find the requested service' not in mgr_restart.msg | default('')

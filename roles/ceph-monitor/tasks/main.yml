@@ -18,6 +18,24 @@
     executable: /bin/bash
   changed_when: false
 
+# Workaround for Ceph 20.2.2 + Python 3.14 bug (tracker.ceph.com/issues/70789)
+# The C++ mgr code leaves an uncleaned AttributeError when NOTIFY_TYPES is missing,
+# which poisons subsequent Python module loads and breaks the dashboard.
+# This workaround adds a default NOTIFY_TYPES to the MgrModule base class.
+# Remove this task once ceph-mgr >= 20.2.3 (or 20.2.2-2.fc44) is available.
+- name: Apply NOTIFY_TYPES workaround for Ceph 20.2.2 + Python 3.14
+  become: true
+  ansible.builtin.lineinfile:
+    path: /usr/share/ceph/mgr/mgr_module.py
+    insertafter: '    MGR_POOL_NAME = ".mgr"'
+    line: '    NOTIFY_TYPES = []'
+    state: present
+  when:
+    - ansible_distribution == "Fedora"
+    - ansible_distribution_major_version | int >= 44
+  register: notify_types_workaround
+  notify: Restart ceph-mgr daemon
+
 - name: Ensure /etc/ceph exists
   become: true
   ansible.builtin.file:
@@ -588,9 +606,19 @@
     ceph config set mgr mgr/dashboard/server_addr 0.0.0.0
   args:
     executable: /bin/bash
-  when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
+  when: inventory_hostname == groups['ceph_monitors'][0]
   run_once: true
   changed_when: true
+
+- name: Create dashboard self-signed certificate (Ceph 20.2.2+ requires SSL)
+  become: true
+  ansible.builtin.shell: |
+    ceph dashboard create-self-signed-cert 2>/dev/null || true
+  args:
+    executable: /bin/bash
+  when: inventory_hostname == groups['ceph_monitors'][0]
+  run_once: true
+  changed_when: false
 
 - name: Create or update dashboard admin user
   become: true
