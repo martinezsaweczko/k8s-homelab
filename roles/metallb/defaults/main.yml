@@ -1,0 +1,22 @@
+---
+# MetalLB default variables
+
+metallb_enabled: true
+metallb_version: "0.14.9"
+metallb_namespace: "metallb-system"
+metallb_ip_pool: "172.26.20.32/27"
+
+# BGP Peering with MikroTik
+metallb_bgp_my_asn: 64513          # MetalLB's AS
+metallb_bgp_peer_ip: 172.26.20.1   # MikroTik peering IP (LAN interface)
+metallb_bgp_peer_asn: 64512        # MikroTik's AS
+
+# Helm repo
+metallb_helm_repo_name: "metallb"
+metallb_helm_repo_url: "https://metallb.github.io/metallb"
+
+# Controller replicas (HA across 3 nodes)
+metallb_controller_replicas: 2
+
+# Kubeconfig path (same convention as k8s-ceph-csi)
+metallb_kubeconfig_path: "{{ ansible_env.HOME }}/.kube/config"

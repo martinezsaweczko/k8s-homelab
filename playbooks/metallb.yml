@@ -1,0 +1,10 @@
+---
+# MetalLB Load Balancer playbook
+- name: Setup MetalLB Load Balancer
+  hosts: k8s_masters
+  serial: 1
+  become: false
+  tags:
+    - metallb
+  roles:
+    - metallb

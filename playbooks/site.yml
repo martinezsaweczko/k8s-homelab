@@ -17,6 +17,11 @@
   tags:
     - kubernetes
 
+- name: Setup MetalLB Load Balancer
+  import_playbook: metallb.yml
+  tags:
+    - metallb
+
 - name: Setup Ceph cluster
   import_playbook: ceph.yml
   tags:

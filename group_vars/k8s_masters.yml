@@ -10,3 +10,6 @@ enable_storage: true
 
 # Enable RBAC for security
 enable_rbac: true
+
+# Enable MetalLB Load Balancer
+metallb_enabled: true
