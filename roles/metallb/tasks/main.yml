@@ -1,0 +1,198 @@
+---
+# MetalLB setup with BGP (FRR mode)
+
+- name: Check if kubeconfig exists
+  ansible.builtin.stat:
+    path: "{{ metallb_kubeconfig_path }}"
+  register: metallb_kubeconfig_stat
+  become: false
+
+- name: Fail if kubeconfig not found
+  ansible.builtin.fail:
+    msg: "Kubeconfig not found at {{ metallb_kubeconfig_path }}. Please ensure Kubernetes is running and kubeconfig is copied."
+  when: not metallb_kubeconfig_stat.stat.exists
+
+- name: Create MetalLB namespace
+  kubernetes.core.k8s:
+    name: "{{ metallb_namespace }}"
+    api_version: v1
+    kind: Namespace
+    state: present
+    kubeconfig: "{{ metallb_kubeconfig_path }}"
+    verify_ssl: false
+  environment:
+    KUBECONFIG: "{{ metallb_kubeconfig_path }}"
+    PYTHONHTTPSVERIFY: "0"
+
+- name: Add MetalLB Helm repository
+  kubernetes.core.helm_repository:
+    name: "{{ metallb_helm_repo_name }}"
+    repo_url: "{{ metallb_helm_repo_url }}"
+    state: present
+  environment:
+    KUBECONFIG: "{{ metallb_kubeconfig_path }}"
+
+- name: Install MetalLB via Helm
+  kubernetes.core.helm:
+    name: metallb
+    chart_ref: "{{ metallb_helm_repo_name }}/metallb"
+    release_namespace: "{{ metallb_namespace }}"
+    chart_version: "{{ metallb_version }}"
+    values:
+      speaker:
+        frr:
+          enabled: true
+      controller:
+        replicas: "{{ metallb_controller_replicas }}"
+    wait: true
+    wait_timeout: 300s
+    update_repo_cache: true
+    kubeconfig: "{{ metallb_kubeconfig_path }}"
+    verify_ssl: false
+  environment:
+    KUBECONFIG: "{{ metallb_kubeconfig_path }}"
+    PYTHONHTTPSVERIFY: "0"
+  register: metallb_helm_install
+  run_once: true
+
+- name: Wait for MetalLB controller to be ready
+  kubernetes.core.k8s_info:
+    kind: Deployment
+    namespace: "{{ metallb_namespace }}"
+    name: metallb-controller
+    kubeconfig: "{{ metallb_kubeconfig_path }}"
+    verify_ssl: false
+    wait: true
+    wait_condition:
+      type: Available
+      status: "True"
+    wait_sleep: 5
+    wait_timeout: 120
+  environment:
+    KUBECONFIG: "{{ metallb_kubeconfig_path }}"
+    PYTHONHTTPSVERIFY: "0"
+  run_once: true
+
+- name: Wait for MetalLB speaker DaemonSet to be ready
+  kubernetes.core.k8s_info:
+    kind: DaemonSet
+    namespace: "{{ metallb_namespace }}"
+    name: metallb-speaker
+    kubeconfig: "{{ metallb_kubeconfig_path }}"
+    verify_ssl: false
+  environment:
+    KUBECONFIG: "{{ metallb_kubeconfig_path }}"
+    PYTHONHTTPSVERIFY: "0"
+  run_once: true
+  register: metallb_speaker_ds
+  retries: 12
+  delay: 5
+  until: >
+    metallb_speaker_ds.resources | length > 0 and
+    metallb_speaker_ds.resources[0].status.desiredNumberScheduled | default(0) | int > 0 and
+    metallb_speaker_ds.resources[0].status.numberReady | default(0) | int == metallb_speaker_ds.resources[0].status.desiredNumberScheduled | int
+
+- name: Apply MetalLB IPAddressPool
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: metallb.io/v1beta1
+      kind: IPAddressPool
+      metadata:
+        name: homelab-pool
+        namespace: "{{ metallb_namespace }}"
+      spec:
+        addresses:
+          - "{{ metallb_ip_pool }}"
+    kubeconfig: "{{ metallb_kubeconfig_path }}"
+    verify_ssl: false
+  environment:
+    KUBECONFIG: "{{ metallb_kubeconfig_path }}"
+    PYTHONHTTPSVERIFY: "0"
+  run_once: true
+
+- name: Apply MetalLB BGPPeer
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: metallb.io/v1beta2
+      kind: BGPPeer
+      metadata:
+        name: mikrotik
+        namespace: "{{ metallb_namespace }}"
+      spec:
+        myASN: "{{ metallb_bgp_my_asn }}"
+        peerASN: "{{ metallb_bgp_peer_asn }}"
+        peerAddress: "{{ metallb_bgp_peer_ip }}"
+    kubeconfig: "{{ metallb_kubeconfig_path }}"
+    verify_ssl: false
+  environment:
+    KUBECONFIG: "{{ metallb_kubeconfig_path }}"
+    PYTHONHTTPSVERIFY: "0"
+  run_once: true
+
+- name: Apply MetalLB BGPAdvertisement
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: metallb.io/v1beta1
+      kind: BGPAdvertisement
+      metadata:
+        name: homelab-advert
+        namespace: "{{ metallb_namespace }}"
+      spec:
+        ipAddressPools:
+          - homelab-pool
+    kubeconfig: "{{ metallb_kubeconfig_path }}"
+    verify_ssl: false
+  environment:
+    KUBECONFIG: "{{ metallb_kubeconfig_path }}"
+    PYTHONHTTPSVERIFY: "0"
+  run_once: true
+
+- name: Verify BGP sessions from MetalLB speakers
+  ansible.builtin.shell: |
+    set -o pipefail
+    kubectl --kubeconfig {{ metallb_kubeconfig_path }} \
+      get pods -n {{ metallb_namespace }} -l app.kubernetes.io/component=speaker \
+      -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | while read pod; do
+      echo "=== $pod ==="
+      kubectl --kubeconfig {{ metallb_kubeconfig_path }} exec \
+        -n {{ metallb_namespace }} "$pod" -c frr -- \
+        vtysh -c "show ip bgp summary" 2>/dev/null || echo "vtysh not ready"
+    done
+  args:
+    executable: /bin/bash
+  register: metallb_bgp_verify
+  changed_when: false
+  failed_when: false
+  run_once: true
+  environment:
+    KUBECONFIG: "{{ metallb_kubeconfig_path }}"
+
+- name: Display BGP verification
+  ansible.builtin.debug:
+    msg: "{{ metallb_bgp_verify.stdout_lines | default([]) }}"
+  run_once: true
+
+- name: Display MetalLB installation summary
+  ansible.builtin.debug:
+    msg:
+      - "=========================================="
+      - "MetalLB Installed (BGP/FRR mode)"
+      - "=========================================="
+      - "Namespace: {{ metallb_namespace }}"
+      - "IP Pool:   {{ metallb_ip_pool }}"
+      - "BGP Peer:  {{ metallb_bgp_peer_ip }} (AS {{ metallb_bgp_peer_asn }})"
+      - "My ASN:    {{ metallb_bgp_my_asn }}"
+      - ""
+      - "Verify speakers:"
+      - "  kubectl get pods -n {{ metallb_namespace }} -l component=speaker"
+      - ""
+      - "Verify BGP from a speaker pod:"
+      - "  kubectl exec -n {{ metallb_namespace }} <speaker-pod> -c frr -- vtysh -c 'show ip bgp summary'"
+      - ""
+      - "MikroTik BGP routes (check on router):"
+      - "  /routing bgp route print where dst-address in 172.26.20.32/27"
+      - "=========================================="
+  run_once: true

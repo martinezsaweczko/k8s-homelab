@@ -25,3 +25,14 @@ ceph_pool_pg_num: 128
 ceph_pool_pgp_num: 128
 ceph_pool_size: 3
 ceph_pool_min_size: 2
+
+# MetalLB Configuration
+metallb_enabled: true
+metallb_version: "0.14.9"
+metallb_namespace: "metallb-system"
+metallb_ip_pool: "172.26.20.32/27"
+
+# BGP Peering with MikroTik
+metallb_bgp_my_asn: 64513          # MetalLB's AS
+metallb_bgp_peer_ip: 172.26.20.1   # MikroTik peering IP (LAN interface)
+metallb_bgp_peer_asn: 64512        # MikroTik's AS
