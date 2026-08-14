@@ -42,9 +42,12 @@
     ceph osd pool create {{ cephfs_metadata_pool }} {{ cephfs_metadata_pg_num }} {{ cephfs_metadata_pg_num }} --autoscale-mode on
   args:
     executable: /bin/bash
-  when: cephfs_metadata_pool_check.rc != 0
+  when:
+    - cephfs_metadata_pool_check.rc != 0
+    - inventory_hostname == groups['ceph_monitors'][0]
   changed_when: true
   failed_when: false
+  run_once: true
 
 - name: Check if CephFS data pool exists
   ansible.builtin.shell: |
@@ -62,9 +65,12 @@
     ceph osd pool create {{ cephfs_data_pool }} {{ cephfs_data_pg_num }} {{ cephfs_data_pg_num }} --autoscale-mode on
   args:
     executable: /bin/bash
-  when: cephfs_data_pool_check.rc != 0
+  when:
+    - cephfs_data_pool_check.rc != 0
+    - inventory_hostname == groups['ceph_monitors'][0]
   changed_when: true
   failed_when: false
+  run_once: true
 
 - name: Check if CephFS filesystem exists
   ansible.builtin.shell: |
@@ -82,9 +88,12 @@
     ceph fs new {{ cephfs_name }} {{ cephfs_metadata_pool }} {{ cephfs_data_pool }}
   args:
     executable: /bin/bash
-  when: cephfs_check.rc != 0
+  when:
+    - cephfs_check.rc != 0
+    - inventory_hostname == groups['ceph_monitors'][0]
   changed_when: true
   failed_when: false
+  run_once: true
 
 - name: Create MDS data directory
   ansible.builtin.file:
