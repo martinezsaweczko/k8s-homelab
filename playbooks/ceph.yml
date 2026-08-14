@@ -10,6 +10,13 @@
   tags: ceph-osd
   roles:
     - ceph-osd
+
+- name: Setup Ceph MDS and CephFS
+  hosts: ceph_monitors
+  tags: ceph-mds
+  roles:
+    - ceph-mds
+
 # - name: Integrate Ceph with Kubernetes
 #   hosts: k8s_masters
 #   roles:

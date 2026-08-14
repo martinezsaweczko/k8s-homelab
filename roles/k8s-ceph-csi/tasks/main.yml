@@ -282,7 +282,146 @@
     PYTHONHTTPSVERIFY: "0"
   when: sc_check.resources | length == 0
 
-- name: Display CSI RBD installation summary
+- name: Create ceph-csi-cephfs namespace
+  kubernetes.core.k8s:
+    name: "{{ ceph_csi_cephfs_namespace }}"
+    api_version: v1
+    kind: Namespace
+    state: present
+    kubeconfig: "{{ kubeconfig_path }}"
+    verify_ssl: false
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+    PYTHONHTTPSVERIFY: "0"
+  when: ceph_csi_cephfs_enabled | bool
+
+- name: Create ceph-secret in ceph-csi-cephfs namespace
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: ceph-secret
+        namespace: "{{ ceph_csi_cephfs_namespace }}"
+      type: Opaque
+      stringData:
+        userID: "{{ ceph_k8s_client }}"
+        userKey: "{{ ceph_client_key.stdout }}"
+        ceph.conf: |
+          [global]
+          fsid = {{ ceph_fsid.stdout }}
+          mon_host = {{ ceph_monitors }}
+          ms_mode = msgr2
+    kubeconfig: "{{ kubeconfig_path }}"
+    verify_ssl: false
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+    PYTHONHTTPSVERIFY: "0"
+  no_log: true
+  run_once: true
+  when: ceph_csi_cephfs_enabled | bool
+
+- name: Install Ceph CSI CephFS driver via Helm
+  kubernetes.core.helm:
+    name: ceph-csi-cephfs
+    chart_ref: ceph-csi/ceph-csi-cephfs
+    release_namespace: "{{ ceph_csi_cephfs_namespace }}"
+    values:
+      kubeletDir: /var/snap/microk8s/common/var/lib/kubelet
+      cephClusterSecretName: ceph-secret
+      cephClusterSecretNamespace: "{{ ceph_csi_cephfs_namespace }}"
+      csiConfig:
+        - clusterID: "{{ ceph_fsid.stdout }}"
+          monitors:
+            - "{{ ceph_monitors }}"
+      provisioner:
+        replicaCount: "{{ ceph_csi_provisioner_replicas }}"
+      nodeplugin:
+        hostNetwork: true
+        tolerations:
+          - effect: NoExecute
+            key: node.kubernetes.io/not-ready
+            operator: Exists
+            tolerationSeconds: 300
+          - effect: NoExecute
+            key: node.kubernetes.io/unreachable
+            operator: Exists
+            tolerationSeconds: 300
+    wait: true
+    force: true
+    update_repo_cache: true
+    kubeconfig: "{{ kubeconfig_path }}"
+    verify_ssl: false
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+    PYTHONHTTPSVERIFY: "0"
+  register: ceph_csi_cephfs_helm_install
+  run_once: true
+  when: ceph_csi_cephfs_enabled | bool
+
+- name: Wait for CephFS CSI provisioner to be ready
+  kubernetes.core.k8s_info:
+    kind: Deployment
+    namespace: "{{ ceph_csi_cephfs_namespace }}"
+    name: ceph-csi-cephfs-provisioner
+    kubeconfig: "{{ kubeconfig_path }}"
+    verify_ssl: false
+    wait: true
+    wait_condition:
+      type: Available
+      status: "True"
+    wait_sleep: 5
+    wait_timeout: 120
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+    PYTHONHTTPSVERIFY: "0"
+  when: ceph_csi_cephfs_enabled | bool
+
+- name: Check if CephFS StorageClass exists
+  kubernetes.core.k8s_info:
+    api_version: storage.k8s.io/v1
+    kind: StorageClass
+    name: "{{ ceph_csi_cephfs_storage_class }}"
+    kubeconfig: "{{ kubeconfig_path }}"
+    verify_ssl: false
+  register: cephfs_sc_check
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+    PYTHONHTTPSVERIFY: "0"
+  when: ceph_csi_cephfs_enabled | bool
+
+- name: Create StorageClass for CephFS
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: storage.k8s.io/v1
+      kind: StorageClass
+      metadata:
+        name: "{{ ceph_csi_cephfs_storage_class }}"
+      provisioner: cephfs.csi.ceph.com
+      parameters:
+        clusterID: "{{ ceph_fsid.stdout }}"
+        fsName: "{{ ceph_csi_cephfs_fs_name }}"
+        pool: cephfs_data
+        csi.storage.k8s.io/provisioner-secret-name: ceph-secret
+        csi.storage.k8s.io/provisioner-secret-namespace: "{{ ceph_csi_cephfs_namespace }}"
+        csi.storage.k8s.io/controller-expand-secret-name: ceph-secret
+        csi.storage.k8s.io/controller-expand-secret-namespace: "{{ ceph_csi_cephfs_namespace }}"
+        csi.storage.k8s.io/node-stage-secret-name: ceph-secret
+        csi.storage.k8s.io/node-stage-secret-namespace: "{{ ceph_csi_cephfs_namespace }}"
+      reclaimPolicy: "{{ ceph_csi_cephfs_reclaim_policy }}"
+      allowVolumeExpansion: "{{ ceph_csi_cephfs_allow_expansion }}"
+    kubeconfig: "{{ kubeconfig_path }}"
+    verify_ssl: false
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+    PYTHONHTTPSVERIFY: "0"
+  when:
+    - ceph_csi_cephfs_enabled | bool
+    - cephfs_sc_check.resources | length == 0
+
+- name: Display CSI installation summary
   ansible.builtin.debug:
     msg:
       - "=========================================="
@@ -298,6 +437,17 @@
       - "Verify installation:"
       - "  kubectl get pods -n {{ ceph_csi_namespace }}"
       - "  kubectl get storageclass {{ ceph_csi_storage_class }}"
+      - ""
+      - "=========================================="
+      - "✓ Ceph CSI CephFS Driver Installed"
+      - "=========================================="
+      - "Namespace: {{ ceph_csi_cephfs_namespace }}"
+      - "StorageClass: {{ ceph_csi_cephfs_storage_class }}"
+      - "Filesystem: {{ ceph_csi_cephfs_fs_name }}"
+      - ""
+      - "Verify installation:"
+      - "  kubectl get pods -n {{ ceph_csi_cephfs_namespace }}"
+      - "  kubectl get storageclass {{ ceph_csi_cephfs_storage_class }}"
       - ""
 
 - name: Test CSI RBD with PVC

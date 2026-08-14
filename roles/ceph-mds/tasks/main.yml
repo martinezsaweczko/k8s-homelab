@@ -1,0 +1,170 @@
+---
+# Ceph MDS setup tasks for CephFS shared filesystem
+# This role creates CephFS pools, the filesystem, and deploys MDS daemons.
+# It also updates the client.kubernetes auth for CephFS CSI access.
+
+- name: Ensure Ceph configuration exists
+  ansible.builtin.stat:
+    path: /etc/ceph/ceph.conf
+  register: ceph_conf_stat
+
+- name: Fail if Ceph configuration is missing
+  ansible.builtin.fail:
+    msg: "Ceph configuration not found at /etc/ceph/ceph.conf. Ensure Ceph monitors are deployed first."
+  when: not ceph_conf_stat.stat.exists
+
+- name: Wait for Ceph monitors to be available
+  ansible.builtin.shell: |
+    set -o pipefail
+    timeout 15 ceph -s || true
+  args:
+    executable: /bin/bash
+  register: ceph_mon_available
+  until: ceph_mon_available.rc == 0
+  retries: 12
+  delay: 5
+  changed_when: false
+  failed_when: false
+
+- name: Check if CephFS metadata pool exists
+  ansible.builtin.shell: |
+    set -o pipefail
+    ceph osd pool ls | grep -q "^{{ cephfs_metadata_pool }}$"
+  args:
+    executable: /bin/bash
+  register: cephfs_metadata_pool_check
+  changed_when: false
+  failed_when: false
+
+- name: Create CephFS metadata pool
+  ansible.builtin.shell: |
+    set -o pipefail
+    ceph osd pool create {{ cephfs_metadata_pool }} {{ cephfs_metadata_pg_num }} {{ cephfs_metadata_pg_num }} --autoscale-mode on
+  args:
+    executable: /bin/bash
+  when: cephfs_metadata_pool_check.rc != 0
+  changed_when: true
+  failed_when: false
+
+- name: Check if CephFS data pool exists
+  ansible.builtin.shell: |
+    set -o pipefail
+    ceph osd pool ls | grep -q "^{{ cephfs_data_pool }}$"
+  args:
+    executable: /bin/bash
+  register: cephfs_data_pool_check
+  changed_when: false
+  failed_when: false
+
+- name: Create CephFS data pool
+  ansible.builtin.shell: |
+    set -o pipefail
+    ceph osd pool create {{ cephfs_data_pool }} {{ cephfs_data_pg_num }} {{ cephfs_data_pg_num }} --autoscale-mode on
+  args:
+    executable: /bin/bash
+  when: cephfs_data_pool_check.rc != 0
+  changed_when: true
+  failed_when: false
+
+- name: Check if CephFS filesystem exists
+  ansible.builtin.shell: |
+    set -o pipefail
+    ceph fs ls | grep -q "name: {{ cephfs_name }}"
+  args:
+    executable: /bin/bash
+  register: cephfs_check
+  changed_when: false
+  failed_when: false
+
+- name: Create CephFS filesystem
+  ansible.builtin.shell: |
+    set -o pipefail
+    ceph fs new {{ cephfs_name }} {{ cephfs_metadata_pool }} {{ cephfs_data_pool }}
+  args:
+    executable: /bin/bash
+  when: cephfs_check.rc != 0
+  changed_when: true
+  failed_when: false
+
+- name: Create MDS data directory
+  ansible.builtin.file:
+    path: "/var/lib/ceph/mds/ceph-{{ hostvars[inventory_hostname].get('ansible_hostname', inventory_hostname) }}"
+    state: directory
+    owner: ceph
+    group: ceph
+    mode: "0750"
+
+- name: Check if MDS keyring exists
+  ansible.builtin.stat:
+    path: "/var/lib/ceph/mds/ceph-{{ hostvars[inventory_hostname].get('ansible_hostname', inventory_hostname) }}/keyring"
+  register: mds_keyring_stat
+
+- name: Create MDS keyring
+  ansible.builtin.shell: |
+    set -o pipefail
+    mon_name={{ hostvars[inventory_hostname].get('ansible_hostname', inventory_hostname) }}
+    ceph auth get-or-create mds.${mon_name} \
+      mon 'allow profile mds' \
+      osd 'allow rw pool={{ cephfs_data_pool }}' \
+      mds 'allow *' \
+      -o /var/lib/ceph/mds/ceph-${mon_name}/keyring
+    chown ceph:ceph /var/lib/ceph/mds/ceph-${mon_name}/keyring
+    chmod 0600 /var/lib/ceph/mds/ceph-${mon_name}/keyring
+  args:
+    executable: /bin/bash
+  when: not mds_keyring_stat.stat.exists
+  changed_when: true
+  failed_when: false
+
+- name: Reload systemd daemon
+  ansible.builtin.systemd:
+    daemon_reload: true
+  changed_when: false
+
+- name: Enable and start ceph-mds service
+  ansible.builtin.systemd:
+    name: "ceph-mds@{{ hostvars[inventory_hostname].get('ansible_hostname', inventory_hostname) }}"
+    enabled: true
+    state: started
+
+- name: Update Ceph client.kubernetes for CephFS access
+  ansible.builtin.shell: |
+    set -o pipefail
+    ceph auth caps client.kubernetes \
+      mon 'allow r, profile rbd' \
+      osd 'profile rbd pool=kubernetes, allow rw pool={{ cephfs_data_pool }}, allow rw pool={{ cephfs_metadata_pool }}' \
+      mds 'allow rw'
+  args:
+    executable: /bin/bash
+  changed_when: true
+  failed_when: false
+  run_once: true
+  when: inventory_hostname == groups['ceph_monitors'][0]
+
+- name: Wait for MDS to become active
+  ansible.builtin.shell: |
+    set -o pipefail
+    ceph fs status | grep -q "active"
+  args:
+    executable: /bin/bash
+  register: mds_active
+  until: mds_active.rc == 0
+  retries: 24
+  delay: 5
+  changed_when: false
+  failed_when: false
+
+- name: Display CephFS setup summary
+  ansible.builtin.debug:
+    msg:
+      - "=========================================="
+      - "✓ CephFS Setup Complete"
+      - "=========================================="
+      - "Filesystem: {{ cephfs_name }}"
+      - "Metadata pool: {{ cephfs_metadata_pool }}"
+      - "Data pool: {{ cephfs_data_pool }}"
+      - "MDS active on: {{ inventory_hostname }}"
+      - ""
+      - "Verify with:"
+      - "  ceph fs status"
+      - "  ceph mds stat"
