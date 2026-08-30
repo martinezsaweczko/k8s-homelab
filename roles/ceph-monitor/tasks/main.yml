@@ -436,7 +436,9 @@
   ansible.builtin.shell: |
     set -o pipefail
     {% for mon in groups['ceph_monitors'] %}
-    ceph mon set-addrs {{ hostvars[mon].ansible_hostname | default(mon) }} "[v2:{{ hostvars[mon].ansible_host | default(mon) }}:3300,v1:{{ hostvars[mon].ansible_host | default(mon) }}:6789]"
+    MON="{{ hostvars[mon].ansible_hostname | default(mon) }}"
+    ADDR="{{ hostvars[mon].ansible_host | default(mon) }}"
+    ceph mon set-addrs "${MON}" "[v2:${ADDR}:3300,v1:${ADDR}:6789]"
     {% endfor %}
   args:
     executable: /bin/bash
