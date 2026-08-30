@@ -197,6 +197,8 @@ ceph crash archive-all                # clear them all
 | **Kubernetes RBD client** | Ceph user `client.kubernetes`, keyring at `/etc/ceph/ceph.client.kubernetes.keyring`; also stored in the `ceph-secret` k8s Secrets (namespaces `ceph-csi-rbd` and `default`) used by the CSI driver |
 | **Cluster FSID** | `ceph fsid` on any node (also in `/etc/ceph/ceph.conf`) |
 
+> **Note on CephFS CSI monitor port:** The CephFS CSI driver uses the Linux kernel client (`mount -t ceph`) by default, which only supports the legacy **msgr1** protocol on port `6789`. It does not support msgr2/port `3300`. Therefore the CSI `ConfigMap` and Secrets must use `:6789` in `mon_host`. See [Ceph msgr2 docs](https://docs.ceph.com/en/latest/rados/configuration/msgr2/) and [Ceph-CSI issue #1258](https://github.com/ceph/ceph-csi/issues/1258).
+
 Change the dashboard password:
 
 ```bash

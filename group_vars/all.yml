@@ -8,6 +8,7 @@ common_update_packages: true
 
 # Kubernetes settings
 k8s_version: "1.28"
+helm_version: "3.13.3"
 container_runtime: "containerd"
 pod_network_cidr: "10.244.0.0/16"
 k8s_microk8s_channel: "stable"

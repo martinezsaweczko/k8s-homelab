@@ -56,9 +56,9 @@
   register: ceph_mon_dump
   changed_when: false
 
-- name: Build monitor list from mon dump with port 3300
+- name: Build monitor list from mon dump with port 6789 (msgr1 for kernel client)
   ansible.builtin.set_fact:
-    ceph_monitors: "{{ (ceph_mon_dump.stdout | from_json).mons | map(attribute='addr') | map('regex_replace', ':[0-9]+/.*$', ':3300') | join(',') }}"
+    ceph_monitors: "{{ (ceph_mon_dump.stdout | from_json).mons | map(attribute='addr') | map('regex_replace', ':[0-9]+/.*$', ':6789') | join(',') }}"
 
 - name: Get Ceph client.kubernetes key
   ansible.builtin.command: sudo ceph auth get-key client.kubernetes
@@ -83,7 +83,6 @@
           [global]
           fsid = {{ ceph_fsid.stdout }}
           mon_host = {{ ceph_monitors }}
-          ms_mode = msgr2
     kubeconfig: "{{ kubeconfig_path }}"
     verify_ssl: false
   environment:
@@ -108,7 +107,6 @@
           [global]
           fsid = {{ ceph_fsid.stdout }}
           mon_host = {{ ceph_monitors }}
-          ms_mode = msgr2
     kubeconfig: "{{ kubeconfig_path }}"
     verify_ssl: false
   environment:
@@ -312,7 +310,6 @@
           [global]
           fsid = {{ ceph_fsid.stdout }}
           mon_host = {{ ceph_monitors }}
-          ms_mode = msgr2
     kubeconfig: "{{ kubeconfig_path }}"
     verify_ssl: false
   environment:

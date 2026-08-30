@@ -1,0 +1,52 @@
+---
+# Example: Shared CephFS volume across multiple pods (ReadWriteMany)
+# CephFS supports RWX (ReadWriteMany) unlike Ceph RBD which only supports RWO.
+# This means multiple pods can read and write the same filesystem simultaneously.
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shared-cephfs-pvc
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ceph-csi-cephfs
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shared-cephfs-app
+  namespace: default
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: shared-cephfs-app
+  template:
+    metadata:
+      labels:
+        app: shared-cephfs-app
+    spec:
+      containers:
+        - name: app
+          image: busybox:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Pod $(hostname) started"
+              while true; do
+                echo "$(date) - $(hostname)" >> /shared-data/log.txt
+                sleep 5
+              done
+          volumeMounts:
+            - name: shared-data
+              mountPath: /shared-data
+      volumes:
+        - name: shared-data
+          persistentVolumeClaim:
+            claimName: shared-cephfs-pvc

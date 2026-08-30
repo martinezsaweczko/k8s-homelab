@@ -103,25 +103,21 @@
     group: ceph
     mode: "0750"
 
-- name: Check if MDS keyring exists
-  ansible.builtin.stat:
-    path: "/var/lib/ceph/mds/ceph-{{ hostvars[inventory_hostname].get('ansible_hostname', inventory_hostname) }}/keyring"
-  register: mds_keyring_stat
-
-- name: Create MDS keyring
+- name: Ensure MDS keyring is correct (create if missing, update caps if needed)
   ansible.builtin.shell: |
     set -o pipefail
     mon_name={{ hostvars[inventory_hostname].get('ansible_hostname', inventory_hostname) }}
+    # Ensure the auth entry exists in Ceph
     ceph auth get-or-create mds.${mon_name} \
       mon 'allow profile mds' \
-      osd 'allow rw pool={{ cephfs_data_pool }}' \
-      mds 'allow *' \
-      -o /var/lib/ceph/mds/ceph-${mon_name}/keyring
+      osd 'allow rwx pool={{ cephfs_data_pool }}, allow rwx pool={{ cephfs_metadata_pool }}' \
+      mds 'allow *'
+    # Write the full keyring (with caps) to the local file, overwriting any stale version
+    ceph auth get mds.${mon_name} -o /var/lib/ceph/mds/ceph-${mon_name}/keyring
     chown ceph:ceph /var/lib/ceph/mds/ceph-${mon_name}/keyring
     chmod 0600 /var/lib/ceph/mds/ceph-${mon_name}/keyring
   args:
     executable: /bin/bash
-  when: not mds_keyring_stat.stat.exists
   changed_when: true
   failed_when: false
 
@@ -141,6 +137,7 @@
     set -o pipefail
     ceph auth caps client.kubernetes \
       mon 'allow r, profile rbd' \
+      mgr 'allow rw' \
       osd 'profile rbd pool=kubernetes, allow rw pool={{ cephfs_data_pool }}, allow rw pool={{ cephfs_metadata_pool }}' \
       mds 'allow rw'
   args:
@@ -162,6 +159,18 @@
   delay: 5
   changed_when: false
   failed_when: false
+  run_once: true
+
+- name: Create CSI subvolumegroup for CephFS CSI driver
+  ansible.builtin.shell: |
+    set -o pipefail
+    ceph fs subvolumegroup create {{ cephfs_name }} csi 2>/dev/null || true
+  args:
+    executable: /bin/bash
+  changed_when: false
+  failed_when: false
+  run_once: true
+  when: inventory_hostname == groups['ceph_monitors'][0]
 
 - name: Display CephFS setup summary
   ansible.builtin.debug:
