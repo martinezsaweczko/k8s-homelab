@@ -45,16 +45,50 @@
       register: tar_install
       changed_when: '"installed" in tar_install.stdout.lower() or "installed" in tar_install.stderr.lower()'
 
+    - name: Ensure curl is installed (required by Helm installer)
+      ansible.builtin.raw: |
+        if ! rpm -q curl &> /dev/null; then
+          dnf install -y curl
+        else
+          echo "curl already installed"
+        fi
+      register: curl_install
+      changed_when: '"installed" in curl_install.stdout.lower() or "installed" in curl_install.stderr.lower()'
+
     - name: Install Helm for Kubernetes package management
       ansible.builtin.raw: |
-        if ! command -v helm &> /dev/null; then
-          curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-        else
-          echo "Helm already installed"
+        set -eo pipefail
+        HELM_VERSION="{{ helm_version | default('3.13.3') }}"
+        HELM_VERSION="v${HELM_VERSION#v}"
+        HELM_INSTALL_DIR="/usr/local/bin"
+        if [ -x "${HELM_INSTALL_DIR}/helm" ]; then
+          INSTALLED_VERSION=$("${HELM_INSTALL_DIR}/helm" version --template="{{ '{{ .Version }}' }}" 2>/dev/null || true)
+          if [ "${INSTALLED_VERSION}" = "${HELM_VERSION}" ]; then
+            echo "Helm ${HELM_VERSION} already installed"
+            exit 0
+          fi
+          echo "Upgrading Helm from ${INSTALLED_VERSION:-unknown} to ${HELM_VERSION}"
         fi
+        OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+        ARCH=$(uname -m)
+        case "$ARCH" in
+          x86_64) ARCH="amd64" ;;
+          aarch64) ARCH="arm64" ;;
+          armv7l) ARCH="arm" ;;
+        esac
+        TMP_DIR=$(mktemp -d)
+        trap 'rm -rf "$TMP_DIR"' EXIT
+        cd "$TMP_DIR"
+        echo "Downloading Helm ${HELM_VERSION} for ${OS}-${ARCH}..."
+        curl -fsSL --retry 3 --retry-delay 2 "https://get.helm.sh/helm-${HELM_VERSION}-${OS}-${ARCH}.tar.gz" -o helm.tar.gz
+        curl -fsSL --retry 3 --retry-delay 2 "https://get.helm.sh/helm-${HELM_VERSION}-${OS}-${ARCH}.tar.gz.sha256" -o helm.tar.gz.sha256
+        printf "%s  %s\n" "$(cat helm.tar.gz.sha256)" "helm.tar.gz" | sha256sum -c -
+        tar -xzf helm.tar.gz
+        cp "${TMP_DIR}/${OS}-${ARCH}/helm" "${HELM_INSTALL_DIR}/helm"
+        chmod 755 "${HELM_INSTALL_DIR}/helm"
+        echo "Helm ${HELM_VERSION} installed into ${HELM_INSTALL_DIR}/helm"
       register: helm_install
-      changed_when: '"installed" in helm_install.stdout.lower() or "downloaded" in helm_install.stdout.lower()'
-      ignore_errors: true
+      changed_when: '"installed" in helm_install.stdout.lower() and "already installed" not in helm_install.stdout.lower()'
 
     - name: Gather facts after bootstrap
       ansible.builtin.setup:

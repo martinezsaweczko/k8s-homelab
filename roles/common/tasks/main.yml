@@ -139,4 +139,5 @@
     name:
       - pyyaml
       - jsonpatch
+      - kubernetes
     state: present

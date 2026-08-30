@@ -15,6 +15,14 @@ ceph_csi_rbd_image_features: layering
 ceph_csi_rbd_reclaim_policy: Delete
 ceph_csi_rbd_allow_expansion: true
 
+# Ceph CSI CephFS settings
+ceph_csi_cephfs_enabled: true
+ceph_csi_cephfs_namespace: ceph-csi-cephfs
+ceph_csi_cephfs_storage_class: ceph-csi-cephfs
+ceph_csi_cephfs_reclaim_policy: Delete
+ceph_csi_cephfs_allow_expansion: true
+ceph_csi_cephfs_fs_name: cephfs
+
 # Test configuration
 enable_ceph_csi_test: false
 ceph_csi_test_pvc_size: 1Gi

@@ -1,0 +1,5 @@
+---
+- name: Restart ceph-mds daemon
+  ansible.builtin.systemd:
+    name: "ceph-mds@{{ hostvars[inventory_hostname].get('ansible_hostname', inventory_hostname) }}"
+    state: restarted

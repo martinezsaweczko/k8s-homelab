@@ -1,0 +1,8 @@
+---
+# Ceph MDS defaults
+ceph_mds_enabled: true
+cephfs_name: cephfs
+cephfs_metadata_pool: cephfs_metadata
+cephfs_data_pool: cephfs_data
+cephfs_metadata_pg_num: 32
+cephfs_data_pg_num: 32

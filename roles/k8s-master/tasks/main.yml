@@ -346,9 +346,39 @@
         state: directory
         mode: "0700"
 
+    - name: Ensure age is installed on admin machine
+      ansible.builtin.shell: |
+        set -eo pipefail
+        INSTALL_DIR="{{ lookup('env', 'HOME') }}/.local/bin"
+        mkdir -p "${INSTALL_DIR}"
+        if [ -x "${INSTALL_DIR}/age-keygen" ]; then
+          echo "age-keygen already available"
+          exit 0
+        fi
+        OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+        ARCH=$(uname -m)
+        case "$ARCH" in
+          x86_64) ARCH="amd64" ;;
+          aarch64) ARCH="arm64" ;;
+          armv7l) ARCH="arm" ;;
+        esac
+        VERSION="v1.2.1"
+        TMP_DIR=$(mktemp -d)
+        trap 'rm -rf "$TMP_DIR"' EXIT
+        cd "$TMP_DIR"
+        echo "Downloading age ${VERSION} for ${OS}-${ARCH}..."
+        curl -fsSL --retry 3 --retry-delay 2 "https://github.com/FiloSottile/age/releases/download/${VERSION}/age-${VERSION}-${OS}-${ARCH}.tar.gz" -o age.tar.gz
+        tar -xzf age.tar.gz
+        cp "age/age" "${INSTALL_DIR}/age"
+        cp "age/age-keygen" "${INSTALL_DIR}/age-keygen"
+        chmod +x "${INSTALL_DIR}/age" "${INSTALL_DIR}/age-keygen"
+        echo "age ${VERSION} installed into ${INSTALL_DIR}"
+      register: age_install
+      changed_when: '"installed" in age_install.stdout and "already available" not in age_install.stdout'
+
     - name: Generate Age keypair if not exists
       ansible.builtin.shell: |
-        age-keygen -o "{{ lookup('env', 'HOME') }}/.config/sops/age/keys.txt"
+        "{{ lookup('env', 'HOME') }}/.local/bin/age-keygen" -o "{{ lookup('env', 'HOME') }}/.config/sops/age/keys.txt"
       args:
         creates: "{{ lookup('env', 'HOME') }}/.config/sops/age/keys.txt"
       register: age_keygen

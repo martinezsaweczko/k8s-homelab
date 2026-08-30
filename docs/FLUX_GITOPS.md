@@ -20,7 +20,7 @@ Ansible (k8s-homelab)          GitOps (k8s-homelab-gitops)
 On your **admin machine** (the laptop/workstation where you run Ansible):
 
 - `gh` CLI installed and authenticated (`gh auth login`)
-- `age` installed (`dnf install age` or from [releases](https://github.com/FiloSottile/age/releases))
+- `age` installed automatically by the `k8s-master` role
 - `sops` installed (from [releases](https://github.com/getsops/sops/releases))
 - `kubectl` or `microk8s kubectl` configured for cluster access
 

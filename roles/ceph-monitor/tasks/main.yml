@@ -282,6 +282,13 @@
   when: inventory_hostname == groups['ceph_monitors'][0] and not ceph_monitor_running
   run_once: true
 
+- name: Check if /tmp/monmap exists on primary
+  ansible.builtin.stat:
+    path: /tmp/monmap
+  register: monmap_file_stat
+  when: inventory_hostname == groups['ceph_monitors'][0]
+  run_once: true
+
 - name: Fetch primary ceph files to controller
   ansible.builtin.fetch:
     src: "{{ item.src }}"
@@ -292,7 +299,9 @@
     - { src: "/etc/ceph/ceph.mon.keyring" }
     - { src: "/etc/ceph/ceph.client.admin.keyring" }
     - { src: "/tmp/monmap" }
-  when: inventory_hostname == groups['ceph_monitors'][0]
+  when:
+    - inventory_hostname == groups['ceph_monitors'][0]
+    - item.src != '/tmp/monmap' or monmap_file_stat.stat.exists | default(false)
   run_once: true
 
 # SECONDARY: copy files from controller (populated from primary) to other monitors and initialize
@@ -421,6 +430,22 @@
     loop_var: mon
   when: inventory_hostname == groups['ceph_monitors'][0]
   run_once: true
+
+- name: Ensure monitors advertise both v2 (3300) and v1 (6789) addresses
+  become: true
+  ansible.builtin.shell: |
+    set -o pipefail
+    {% for mon in groups['ceph_monitors'] %}
+    MON="{{ hostvars[mon].ansible_hostname | default(mon) }}"
+    ADDR="{{ hostvars[mon].ansible_host | default(mon) }}"
+    ceph mon set-addrs "${MON}" "[v2:${ADDR}:3300,v1:${ADDR}:6789]"
+    {% endfor %}
+  args:
+    executable: /bin/bash
+  when: inventory_hostname == groups['ceph_monitors'][0]
+  run_once: true
+  changed_when: true
+  failed_when: false
 
 # - name: Verify cluster has quorum (using legacy port)
 #   become: true

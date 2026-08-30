@@ -23,8 +23,8 @@ echo "[1/6] Checking for Ceph CSI RBD driver..."
 
 # Check if helm is installed
 if ! command -v helm &> /dev/null; then
-  echo "ERROR: helm is not installed. Please install helm first:"
-  echo "  curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash"
+  echo "ERROR: helm is not installed. Please install helm first, for example:"
+  echo "  ansible-playbook -i inventories/hosts.yml playbooks/bootstrap.yml"
   exit 1
 fi
 

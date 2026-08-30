@@ -2,7 +2,7 @@
 fsid = {{ ceph_cluster_fsid }}
 mon_initial_members = {% for host in groups['ceph_monitors'] %}{{ hostvars[host].ansible_facts['hostname'] | default(hostvars[host].inventory_hostname) }}{% if not loop.last %},{% endif %}{% endfor %}
 
-mon_host = {% for host in groups['ceph_monitors'] %}[v2:{{ hostvars[host].ansible_host }}:3300]{% if not loop.last %},{% endif %}{% endfor %}
+mon_host = {% for host in groups['ceph_monitors'] %}[v2:{{ hostvars[host].ansible_host }}:3300,v1:{{ hostvars[host].ansible_host }}:6789]{% if not loop.last %},{% endif %}{% endfor %}
 
 # Enable msgr2 on all monitors
 # ms_bind_port_min = 3300
@@ -18,11 +18,11 @@ auth_client_required = cephx
 [mon]
 ms_mon_preferred_osd_proto = msgr2
 ms_bind_msgr2 = true
-ms_bind_msgr1 = false
+ms_bind_msgr1 = true
 
-# Performance tun
+# Performance tuning
 ms_bind_msgr2 = true
-ms_bind_msgr1 = false
+ms_bind_msgr1 = true
 
 osd_journal_size = 5120
 osd_pool_default_size = 3
