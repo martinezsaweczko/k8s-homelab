@@ -386,8 +386,7 @@
 
     - name: Extract Age public key
       ansible.builtin.shell: |
-        set -o pipefail
-        grep -i "public key" "{{ lookup('env', 'HOME') }}/.config/sops/age/keys.txt" | awk '{print $3}'
+        "{{ lookup('env', 'HOME') }}/.local/bin/age-keygen" -y "{{ lookup('env', 'HOME') }}/.config/sops/age/keys.txt"
       args:
         executable: /bin/bash
       register: age_public_key
@@ -446,7 +445,8 @@
           --repository=k8s-homelab-gitops \
           --branch=main \
           --path=cluster \
-          --private=false
+          --private=false \
+          --components-extra=image-reflector-controller,image-automation-controller
       environment:
         KUBECONFIG: "{{ ansible_env.HOME }}/.kube/config"
       register: flux_bootstrap
